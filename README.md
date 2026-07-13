@@ -40,7 +40,9 @@ mvn clean package
 - `display.suffix` / `display.thousands-separator` — 금액 표시(접미사, 3자리 콤마).
 - `redis.*` — (선택) 교차서버 캐시 무효화. 끄면 캐시 없이 항상 DB 조회.
 
-`messages.yml` — 전부 MiniMessage 템플릿. 플레이스홀더 `<amount> <suffix> <player> <uuid>`, 커스텀 태그 `<glyph:이름>` 지원.
+`messages.yml` — **플레이어에게 나가는 모든 문구를 여기서 수정**한다(하드코딩된 메세지 없음). 지원: MiniMessage 전체 태그(`<gold>`, `<gradient>`, `<hover>`, `<click>` …), 내부 플레이스홀더 `<amount>`(콤마)·`<suffix>`·`<player>`·`<uuid>`, **PlaceholderAPI `%...%`**(`%player_name%`, `%credit_balance%` 등 — PAPI 설치 시, 메세지를 보는 플레이어 기준으로 MiniMessage 파싱 전에 해석), 커스텀 글리프 `<glyph:이름>`.
+
+> PAPI 확장이 메인 스레드를 가정할 수 있어, 명령어 응답은 DB 조회(비동기) 후 **메인 스레드에서 메세지 빌드·전송**한다(TPS 영향 없음). 자동충전 지급 알림(`charge-received`)도 메인 스레드 전송이라 `%...%` 가 안전하게 동작한다.
 
 ---
 

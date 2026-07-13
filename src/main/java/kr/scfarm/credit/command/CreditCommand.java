@@ -10,6 +10,9 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
+
+import net.kyori.adventure.text.Component;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +20,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 /**
  * {@code /크레딧} 명령어 처리 + 탭완성.
@@ -25,7 +29,8 @@ import java.util.concurrent.CompletableFuture;
  * {@code credit.admin} 전용이며 권한이 없으면 탭완성/사용법에 노출되지 않는다.
  *
  * <p>Bukkit(online/usercache) 조회는 이 핸들러가 실행되는 <b>메인 스레드</b>에서만 수행하고,
- * DB/HTTP 는 비동기로 넘긴다. 완료 후 메세지 전송은 Adventure 오디언스로 안전하게 처리한다.
+ * DB/HTTP 는 비동기로 넘긴다. 완료 후 메세지 <b>빌드(PlaceholderAPI 해석 포함) + 전송</b>은
+ * {@link #reply}(항상 메인 스레드)로 처리한다 — 일부 PAPI 확장이 메인 스레드를 가정하기 때문이다.
  */
 public final class CreditCommand implements CommandExecutor, TabCompleter {
 
@@ -33,14 +38,30 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     private static final String PERM_USE = "credit.use";
     private static final List<String> SUBCOMMANDS = List.of("확인", "지급", "차감", "인증");
 
+    private final Plugin plugin;
     private final CreditService credit;
     private final Messages msg;
     private final NameResolver names;
 
-    public CreditCommand(CreditService credit, Messages msg, NameResolver names) {
+    public CreditCommand(Plugin plugin, CreditService credit, Messages msg, NameResolver names) {
+        this.plugin = plugin;
         this.credit = credit;
         this.msg = msg;
         this.names = names;
+    }
+
+    /** 메세지 빌드(PAPI 해석 포함) + 전송을 메인 스레드에서 수행. 비동기 콜백에서도 안전. */
+    private void reply(CommandSender sender, Supplier<Component> builder) {
+        if (Bukkit.isPrimaryThread()) {
+            sender.sendMessage(builder.get());
+        } else {
+            plugin.getServer().getGlobalRegionScheduler().execute(plugin, () -> sender.sendMessage(builder.get()));
+        }
+    }
+
+    /** 메세지를 읽는 대상(=sender)이 플레이어면 그 플레이어를 PAPI 컨텍스트로 쓴다(뷰어 기준 %...% 해석). */
+    private static OfflinePlayer papiOf(CommandSender sender) {
+        return sender instanceof Player p ? p : null;
     }
 
     @Override
@@ -52,7 +73,7 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
 
         // 서브명령어는 전부 관리자 전용
         if (!sender.hasPermission(PERM_ADMIN)) {
-            sender.sendMessage(msg.get("no-permission"));
+            reply(sender, () -> msg.get("no-permission", papiOf(sender)));
             return true;
         }
 
@@ -62,7 +83,7 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             case "지급" -> handleGiveTake(sender, args, true);
             case "차감" -> handleGiveTake(sender, args, false);
             case "인증" -> handleVerify(sender, args);
-            default -> sender.sendMessage(msg.get("usage-admin"));
+            default -> reply(sender, () -> msg.get("usage-admin", papiOf(sender)));
         }
         return true;
     }
@@ -70,19 +91,19 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     // /크레딧 — 본인 잔액
     private void handleSelf(CommandSender sender) {
         if (!(sender instanceof Player player)) {
-            sender.sendMessage(msg.get("player-only"));
+            reply(sender, () -> msg.get("player-only"));
             return;
         }
         if (!player.hasPermission(PERM_USE)) {
-            player.sendMessage(msg.get("no-permission"));
+            reply(player, () -> msg.get("no-permission", player));
             return;
         }
         UUID uuid = player.getUniqueId();
         credit.getBalance(uuid).whenComplete((balance, ex) -> {
             if (ex != null) {
-                player.sendMessage(msg.get("db-error"));
+                reply(player, () -> msg.get("db-error", player));
             } else {
-                player.sendMessage(msg.amount("balance-self", balance));
+                reply(player, () -> msg.amount("balance-self", player, balance));
             }
         });
     }
@@ -90,21 +111,21 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     // /크레딧 확인 <닉네임>
     private void handleCheck(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(msg.get("usage-admin"));
+            reply(sender, () -> msg.get("usage-admin", papiOf(sender)));
             return;
         }
         String nick = args[1];
         resolveUuid(nick).whenComplete((opt, ex) -> {
             if (ex != null || opt == null || opt.isEmpty()) {
-                sender.sendMessage(msg.get("player-not-found"));
+                reply(sender, () -> msg.get("player-not-found", papiOf(sender)));
                 return;
             }
             UUID uuid = opt.get();
             credit.getBalance(uuid).whenComplete((balance, dbEx) -> {
                 if (dbEx != null) {
-                    sender.sendMessage(msg.get("db-error"));
+                    reply(sender, () -> msg.get("db-error", papiOf(sender)));
                 } else {
-                    sender.sendMessage(msg.playerAmount("balance-other", nick, balance));
+                    reply(sender, () -> msg.playerAmount("balance-other", papiOf(sender), nick, balance));
                 }
             });
         });
@@ -113,7 +134,7 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     // /크레딧 지급|차감 <닉네임> <금액>
     private void handleGiveTake(CommandSender sender, String[] args, boolean give) {
         if (args.length < 3) {
-            sender.sendMessage(msg.get("usage-admin"));
+            reply(sender, () -> msg.get("usage-admin", papiOf(sender)));
             return;
         }
         String nick = args[1];
@@ -121,17 +142,17 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
         try {
             amount = Long.parseLong(args[2]);
         } catch (NumberFormatException e) {
-            sender.sendMessage(msg.get("invalid-amount"));
+            reply(sender, () -> msg.get("invalid-amount", papiOf(sender)));
             return;
         }
         if (amount <= 0) {
-            sender.sendMessage(msg.get("invalid-amount"));
+            reply(sender, () -> msg.get("invalid-amount", papiOf(sender)));
             return;
         }
 
         resolveUuid(nick).whenComplete((opt, ex) -> {
             if (ex != null || opt == null || opt.isEmpty()) {
-                sender.sendMessage(msg.get("player-not-found"));
+                reply(sender, () -> msg.get("player-not-found", papiOf(sender)));
                 return;
             }
             UUID uuid = opt.get();
@@ -140,13 +161,13 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
                     : credit.take(uuid, amount, "ADMIN_TAKE");
             op.whenComplete((ok, dbEx) -> {
                 if (dbEx != null) {
-                    sender.sendMessage(msg.get("db-error"));
+                    reply(sender, () -> msg.get("db-error", papiOf(sender)));
                 } else if (Boolean.TRUE.equals(ok)) {
-                    sender.sendMessage(msg.playerAmount(give ? "give-success" : "take-success", nick, amount));
+                    reply(sender, () -> msg.playerAmount(give ? "give-success" : "take-success", papiOf(sender), nick, amount));
                 } else if (!give) {
-                    sender.sendMessage(msg.get("take-insufficient"));
+                    reply(sender, () -> msg.get("take-insufficient", papiOf(sender)));
                 } else {
-                    sender.sendMessage(msg.get("db-error"));
+                    reply(sender, () -> msg.get("db-error", papiOf(sender)));
                 }
             });
         });
@@ -155,21 +176,21 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     // /크레딧 인증 <uuid>
     private void handleVerify(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(msg.get("usage-admin"));
+            reply(sender, () -> msg.get("usage-admin", papiOf(sender)));
             return;
         }
         UUID uuid;
         try {
             uuid = UUID.fromString(args[1].trim());
         } catch (IllegalArgumentException e) {
-            sender.sendMessage(msg.get("invalid-uuid"));
+            reply(sender, () -> msg.get("invalid-uuid", papiOf(sender)));
             return;
         }
         resolveName(uuid).whenComplete((opt, ex) -> {
             if (ex != null || opt == null || opt.isEmpty()) {
-                sender.sendMessage(msg.verify("verify-notfound", uuid, null));
+                reply(sender, () -> msg.verify("verify-notfound", papiOf(sender), uuid, null));
             } else {
-                sender.sendMessage(msg.verify("verify-result", uuid, opt.get()));
+                reply(sender, () -> msg.verify("verify-result", papiOf(sender), uuid, opt.get()));
             }
         });
     }

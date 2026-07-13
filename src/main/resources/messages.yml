@@ -1,7 +1,11 @@
 # ============================================================
-#  플레이어 표시 문구 (전부 MiniMessage 템플릿)
-#  플레이스홀더: <amount>(콤마 포맷 적용값), <suffix>, <player>, <uuid>
-#  커스텀 태그: <glyph:이름>  →  아래 glyphs 섹션에서 정의한 문자를 삽입(폰트 지정 가능)
+#  플레이어 표시 문구 — 여기서 자유롭게 수정 가능(리로드/재시작 시 반영)
+#
+#  ▶ MiniMessage: <gold> <gradient:#a:#b> <hover:show_text:'...'> <click> 등 전체 태그
+#  ▶ 내부 플레이스홀더: <amount>(콤마 포맷), <suffix>, <player>(닉네임), <uuid>
+#  ▶ PlaceholderAPI: %player_name% %credit_balance% 등 %...% 도 동작
+#      (PlaceholderAPI 설치 시. 메세지를 "보는 플레이어" 기준 해석)
+#  ▶ 커스텀 글리프: <glyph:이름> → 아래 glyphs 섹션 정의 문자 삽입(폰트 지정 가능)
 # ============================================================
 
 balance-self:      "<gray>보유 크레딧: </gray><gold><amount></gold><gray><suffix></gray>"
@@ -9,7 +13,8 @@ balance-other:     "<gray><player> 님의 크레딧: </gray><gold><amount></gold
 give-success:      "<green><player> 님에게 <amount><suffix> 지급 완료</green>"
 take-success:      "<green><player> 님에게서 <amount><suffix> 차감 완료</green>"
 take-insufficient: "<red>잔액이 부족합니다.</red>"
-charge-received:   "<green>홈페이지 충전 </green><gold><amount></gold><green><suffix>이 지급되었습니다.</green>"
+# 자동충전 지급 알림(온라인 유저에게). <player>=지급 대상, <amount>/<suffix>=금액. %...% 도 사용 가능.
+charge-received:   "<green><player> 님, 홈페이지 충전 </green><gold><amount></gold><green><suffix>이 지급되었습니다.</green>"
 verify-result:     "<gray>UUID <white><uuid></white> → 닉네임: </gray><yellow><player></yellow>"
 verify-notfound:   "<red>해당 UUID의 닉네임을 찾을 수 없습니다.</red>"
 player-not-found:  "<red>대상 플레이어를 찾을 수 없습니다.</red>"

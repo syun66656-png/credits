@@ -123,7 +123,7 @@ public final class CreditPlugin extends JavaPlugin {
         getServer().getServicesManager().register(CreditAPI.class, creditService, this, ServicePriority.Normal);
 
         // 6) 명령어
-        CreditCommand command = new CreditCommand(creditService, messages, names);
+        CreditCommand command = new CreditCommand(this, creditService, messages, names);
         if (getCommand("크레딧") != null) {
             getCommand("크레딧").setExecutor(command);
             getCommand("크레딧").setTabCompleter(command);
@@ -236,7 +236,8 @@ public final class CreditPlugin extends JavaPlugin {
         getServer().getGlobalRegionScheduler().execute(this, () -> {
             org.bukkit.entity.Player p = getServer().getPlayer(uuid);
             if (p != null && messages != null) {
-                p.sendMessage(messages.amount("charge-received", amount));
+                // 메인 스레드 → PAPI(%...%) 안전. <player> = 지급 대상 닉네임.
+                p.sendMessage(messages.playerAmount("charge-received", p, p.getName(), amount));
             }
         });
     }
@@ -258,7 +259,9 @@ public final class CreditPlugin extends JavaPlugin {
         FileConfiguration messagesConfig = YamlConfiguration.loadConfiguration(file);
         String suffix = config.getString("display.suffix", "원");
         boolean comma = config.getBoolean("display.thousands-separator", true);
-        return new Messages(messagesConfig, suffix, comma);
+        // PlaceholderAPI(softdepend)가 설치돼 있으면 메세지에서 %...% 를 해석한다.
+        boolean papi = getServer().getPluginManager().getPlugin("PlaceholderAPI") != null;
+        return new Messages(messagesConfig, suffix, comma, papi);
     }
 
     private void saveDefaultResource(String name) {
