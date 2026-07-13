@@ -15,6 +15,13 @@ database:
 
 homepage:
   # 홈페이지 결제 브릿지. 오프라인/미접속 UUID 도 지급된다(UUID 기반 DB UPSERT).
+  #
+  # ★ 벨로시티 다중 백엔드 주의 ★
+  #   브릿지 폴링은 "네트워크 전체에서 딱 한 서버"에서만 켠다(bridge-enabled: true).
+  #   나머지 백엔드는 bridge-enabled: false 로 두어라 — 크레딧 지급/조회/명령어는 그대로 동작하고,
+  #   폴링(홈페이지 API 호출)과 [크레딧 자동충전] 감사 로그만 그 한 서버에 모인다.
+  #   (지급은 charge_id PK 멱등이라 여러 서버가 켜져도 중복 지급은 없지만, 로그가 흩어지고 폴링이 낭비된다.)
+  bridge-enabled: true
   base-url: "https://scfarm.kr"
   # 홈페이지 운영자에게 받은 비밀키. 절대 로그/채팅에 노출하지 않는다.
   plugin-key: "여기에_PLUGIN_API_KEY"

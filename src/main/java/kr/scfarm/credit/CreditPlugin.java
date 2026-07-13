@@ -179,6 +179,14 @@ public final class CreditPlugin extends JavaPlugin {
         if (hp == null) {
             return;
         }
+        // 벨로시티 다중 백엔드에서는 브릿지 폴링을 "한 서버에서만" 켜야 한다.
+        // 그래야 (1) 홈페이지 API 를 서버 수만큼 중복 폴링하지 않고,
+        //        (2) [크레딧 자동충전] 감사 로그가 항상 그 한 서버의 로그 파일에만 남아 추적이 쉽다.
+        // (지급 자체는 charge_id PK 멱등이라 여러 서버가 켜져도 중복 지급은 없지만, 로그가 흩어진다.)
+        if (!hp.getBoolean("bridge-enabled", true)) {
+            getComponentLogger().info("홈페이지 브릿지: bridge-enabled=false → 이 서버에서는 폴링하지 않습니다(크레딧 기능은 정상).");
+            return;
+        }
         int interval = hp.getInt("poll-interval-seconds", 60);
         String baseUrl = hp.getString("base-url", "");
         String key = hp.getString("plugin-key", "");
