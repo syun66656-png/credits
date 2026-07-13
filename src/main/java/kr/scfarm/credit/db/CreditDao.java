@@ -5,6 +5,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -31,6 +34,19 @@ public final class CreditDao {
             "INSERT INTO credit_ledger (uuid, delta, balance_after, reason, ref) VALUES (?, ?, ?, ?, ?)";
     private static final String SQL_PROCESSED_INSERT =
             "INSERT INTO credit_processed_charge (charge_id, uuid, amount) VALUES (?, ?, ?)";
+    // 닉네임 캐시(PlayerPoints username_cache 패턴). 닉변으로 같은 이름이 여러 UUID 에 남을 수 있으므로
+    // 이름→UUID 는 가장 최근 기록을 택한다(PlayerPoints 는 임의 1건이라 닉변 시 오지급 여지가 있었음 — 개선).
+    private static final String SQL_USERNAME_UPSERT =
+            "INSERT INTO credit_username_cache (uuid, username) VALUES (?, ?) " +
+            "ON DUPLICATE KEY UPDATE username = VALUES(username)";
+    private static final String SQL_USERNAME_BY_UUID =
+            "SELECT username FROM credit_username_cache WHERE uuid = ?";
+    private static final String SQL_UUID_BY_NAME =
+            "SELECT uuid FROM credit_username_cache WHERE LOWER(username) = LOWER(?) " +
+            "ORDER BY updated_at DESC LIMIT 1";
+
+    /** 데드락/락 타임아웃 재시도 횟수. */
+    private static final int MAX_RETRY = 3;
 
     private final DatabaseManager db;
 
@@ -51,6 +67,10 @@ public final class CreditDao {
 
     /** 지급: 원자적 UPSERT + 같은 트랜잭션에서 원장 기록. amount<=0 은 실패. */
     public boolean give(UUID uuid, long amount, String reason, String ref) throws SQLException {
+        return withRetry(() -> give0(uuid, amount, reason, ref));
+    }
+
+    private boolean give0(UUID uuid, long amount, String reason, String ref) throws SQLException {
         if (amount <= 0) {
             return false;
         }
@@ -82,6 +102,10 @@ public final class CreditDao {
      * 성공 시 같은 트랜잭션에서 원장 기록. 절대 음수 불가. amount<=0 은 실패.
      */
     public boolean take(UUID uuid, long amount, String reason, String ref) throws SQLException {
+        return withRetry(() -> take0(uuid, amount, reason, ref));
+    }
+
+    private boolean take0(UUID uuid, long amount, String reason, String ref) throws SQLException {
         if (amount <= 0) {
             return false;
         }
@@ -116,6 +140,10 @@ public final class CreditDao {
 
     /** 설정: 잔액을 amount 로 고정. 증감분(delta)을 원장에 기록. amount<0 은 실패. */
     public boolean set(UUID uuid, long amount, String reason) throws SQLException {
+        return withRetry(() -> set0(uuid, amount, reason));
+    }
+
+    private boolean set0(UUID uuid, long amount, String reason) throws SQLException {
         if (amount < 0) {
             return false;
         }
@@ -142,8 +170,19 @@ public final class CreditDao {
         }
     }
 
-    /** 이체: 출금(조건부 차감) → 입금(UPSERT) 을 단일 트랜잭션으로. 잔액 부족 시 전체 롤백 후 false. */
+    /**
+     * 이체: 출금(조건부 차감) + 입금(UPSERT) 을 단일 트랜잭션으로. 잔액 부족 시 전체 롤백 후 false.
+     *
+     * <p>행 잠금은 항상 <b>UUID 사전순</b>으로 획득한다 — A→B 와 B→A 이체가 동시에 일어나면 서로 반대
+     * 순서로 행을 잠가 데드락이 나는 고전적 문제(PlayerPoints 의 "Lock on point modifications to
+     * prevent duplications" 커밋이 다룬 동시성 버그 계열)를 잠금 순서 고정으로 원천 차단한다.
+     * 입금을 먼저 실행한 경우에도 출금 실패 시 전체 롤백되므로 원자성은 유지된다.
+     */
     public boolean pay(UUID from, UUID to, long amount, String reason) throws SQLException {
+        return withRetry(() -> pay0(from, to, amount, reason));
+    }
+
+    private boolean pay0(UUID from, UUID to, long amount, String reason) throws SQLException {
         if (amount <= 0 || from.equals(to)) {
             return false;
         }
@@ -152,22 +191,21 @@ public final class CreditDao {
             conn = db.getConnection();
             conn.setAutoCommit(false);
 
-            int affected;
-            try (PreparedStatement up = conn.prepareStatement(SQL_TAKE_CONDITIONAL)) {
-                up.setLong(1, amount);
-                up.setString(2, from.toString());
-                up.setLong(3, amount);
-                affected = up.executeUpdate();
+            boolean fromFirst = from.toString().compareTo(to.toString()) < 0;
+            if (fromFirst) {
+                if (!takeRow(conn, from, amount)) {
+                    conn.rollback();
+                    return false;
+                }
+                giveRow(conn, to, amount);
+            } else {
+                giveRow(conn, to, amount);
+                if (!takeRow(conn, from, amount)) {
+                    conn.rollback(); // 입금까지 함께 되돌린다
+                    return false;
+                }
             }
-            if (affected == 0) {
-                conn.rollback();
-                return false;
-            }
-            try (PreparedStatement up = conn.prepareStatement(SQL_GIVE_UPSERT)) {
-                up.setString(1, to.toString());
-                up.setLong(2, amount);
-                up.executeUpdate();
-            }
+
             long fromAfter = readBalance(conn, from);
             long toAfter = readBalance(conn, to);
             insertLedger(conn, from, -amount, fromAfter, reason, to.toString());
@@ -193,6 +231,10 @@ public final class CreditDao {
      * charge_id PK 충돌로 재지급이 원천 차단된다. 오류 시 롤백 후 {@link ChargeResult#FAILED}.
      */
     public ChargeResult processCharge(String chargeId, UUID uuid, long amount) throws SQLException {
+        return withRetry(() -> processCharge0(chargeId, uuid, amount));
+    }
+
+    private ChargeResult processCharge0(String chargeId, UUID uuid, long amount) throws SQLException {
         if (amount <= 0) {
             // 비정상 금액은 지급하지 않지만, 무한 재처리를 막기 위해 이미처리로 간주(processed 만 기록).
             return markInvalidCharge(chargeId, uuid, amount);
@@ -249,6 +291,96 @@ public final class CreditDao {
         return ChargeResult.ALREADY_PROCESSED;
     }
 
+    // ── 닉네임 캐시 (PlayerPoints username_cache 패턴) ──────────────────────
+
+    /** 접속/조회로 확인된 닉네임을 DB 캐시에 반영(단문 UPSERT, 자체 원자적). */
+    public void upsertUsername(UUID uuid, String username) throws SQLException {
+        if (username == null || username.isBlank()) {
+            return;
+        }
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SQL_USERNAME_UPSERT)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, username);
+            ps.executeUpdate();
+        }
+    }
+
+    /** DB 닉네임 캐시에서 UUID→닉네임 조회. 없으면 null. */
+    public String lookupUsername(UUID uuid) throws SQLException {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SQL_USERNAME_BY_UUID)) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    /** DB 닉네임 캐시에서 닉네임→UUID 조회(대소문자 무시, 최근 갱신 우선). 없으면 null. */
+    public UUID lookupUuidByName(String username) throws SQLException {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SQL_UUID_BY_NAME)) {
+            ps.setString(1, username);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? UUID.fromString(rs.getString(1)) : null;
+            }
+        }
+    }
+
+    // ── 배치 조회 (온라인 유저 캐시 주기 리프레시용) ─────────────────────────
+
+    /**
+     * 여러 UUID 의 잔액을 한 번의 쿼리로 조회한다. 행이 없는 UUID 는 0 으로 채워 반환한다.
+     * (PlayerPoints 의 pointsCache 주기 갱신에 해당 — 우리 placeholder 캐시의 교차서버 스테일 해소용)
+     */
+    public Map<UUID, Long> getBalances(Collection<UUID> uuids) throws SQLException {
+        Map<UUID, Long> out = new HashMap<>();
+        if (uuids.isEmpty()) {
+            return out;
+        }
+        for (UUID u : uuids) {
+            out.put(u, 0L);
+        }
+        StringBuilder sql = new StringBuilder("SELECT uuid, balance FROM credit_balance WHERE uuid IN (");
+        sql.append("?,".repeat(uuids.size()));
+        sql.setCharAt(sql.length() - 1, ')');
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int i = 1;
+            for (UUID u : uuids) {
+                ps.setString(i++, u.toString());
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.put(UUID.fromString(rs.getString(1)), rs.getLong(2));
+                }
+            }
+        }
+        return out;
+    }
+
+    // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
+
+    /** 조건부 차감 1행. 잔액 부족(영향 행 0)이면 false. */
+    private boolean takeRow(Connection conn, UUID uuid, long amount) throws SQLException {
+        try (PreparedStatement up = conn.prepareStatement(SQL_TAKE_CONDITIONAL)) {
+            up.setLong(1, amount);
+            up.setString(2, uuid.toString());
+            up.setLong(3, amount);
+            return up.executeUpdate() > 0;
+        }
+    }
+
+    /** 지급 UPSERT 1행. */
+    private void giveRow(Connection conn, UUID uuid, long amount) throws SQLException {
+        try (PreparedStatement up = conn.prepareStatement(SQL_GIVE_UPSERT)) {
+            up.setString(1, uuid.toString());
+            up.setLong(2, amount);
+            up.executeUpdate();
+        }
+    }
+
     private long readBalance(Connection conn, UUID uuid) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_BALANCE)) {
             ps.setString(1, uuid.toString());
@@ -272,6 +404,43 @@ public final class CreditDao {
             }
             ps.executeUpdate();
         }
+    }
+
+    @FunctionalInterface
+    private interface SqlOp<T> {
+        T run() throws SQLException;
+    }
+
+    /**
+     * 데드락(1213/40001)·락 대기 타임아웃(1205) 시 짧은 백오프 후 재시도. InnoDB 는 데드락 감지 시
+     * 한쪽 트랜잭션을 롤백하고 예외를 던지는데, 우리 트랜잭션은 전부 자기완결적이라 재실행이 안전하다.
+     * (PlayerPoints 가 메모리 잠금으로 풀었던 동시 변경 문제의 DB 레벨 대응)
+     */
+    private <T> T withRetry(SqlOp<T> op) throws SQLException {
+        SQLException last = null;
+        for (int attempt = 1; attempt <= MAX_RETRY; attempt++) {
+            try {
+                return op.run();
+            } catch (SQLException e) {
+                if (!isTransientConflict(e) || attempt == MAX_RETRY) {
+                    throw e;
+                }
+                last = e;
+                try {
+                    Thread.sleep(30L * attempt); // 비동기 스레드에서만 호출되므로 짧은 sleep 허용
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+        throw last; // 도달 불가(위에서 throw)지만 컴파일러용
+    }
+
+    private static boolean isTransientConflict(SQLException e) {
+        return "40001".equals(e.getSQLState())      // 직렬화 실패(데드락 표준 상태)
+                || e.getErrorCode() == 1213         // MariaDB deadlock
+                || e.getErrorCode() == 1205;        // MariaDB lock wait timeout
     }
 
     private static boolean isDuplicateKey(SQLException e) {

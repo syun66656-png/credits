@@ -32,12 +32,12 @@ public final class DatabaseManager {
         // 실패 시 빠르게 판단(비활성화 결정)하도록 짧게. 무손실 우선: 커넥션이 없으면 연산 자체를 하지 않는다.
         hikari.setConnectionTimeout(5_000L);
         hikari.setInitializationFailTimeout(5_000L);
-        hikari.addDataSourceProperty("cachePrepStmts", "true");
-        hikari.addDataSourceProperty("prepStmtCacheSize", "250");
-        hikari.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        // utf8mb4 보장
-        hikari.addDataSourceProperty("useUnicode", "true");
-        hikari.addDataSourceProperty("characterEncoding", "utf8");
+        // 유휴 커넥션이 방화벽/wait_timeout 에 조용히 끊겨 첫 연산이 실패하는 사고 방지(PlayerPoints 계열의
+        // 커넥션 드랍 이슈 교훈). 5분마다 keepalive ping.
+        hikari.setKeepaliveTime(300_000L);
+        // MariaDB 드라이버용 프리페어드 스테이트먼트 서버측 캐시(Connector/J 의 cachePrepStmts 류는
+        // MariaDB 드라이버가 무시하므로 쓰지 않는다)
+        hikari.addDataSourceProperty("useServerPrepStmts", "true");
 
         this.dataSource = new HikariDataSource(hikari);
     }
@@ -90,6 +90,16 @@ public final class DatabaseManager {
                       uuid         CHAR(36)    NOT NULL,
                       amount       BIGINT      NOT NULL,
                       processed_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            // 닉네임 캐시(UUID↔닉네임, 접속 시 갱신). PlayerPoints 의 username_cache 테이블 패턴:
+            // 멀티 백엔드 네트워크에서 "다른 서버로만 접속했던" 유저도 닉네임/UUID 해석이 가능해진다.
+            st.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS credit_username_cache (
+                      uuid       CHAR(36)    NOT NULL PRIMARY KEY,
+                      username   VARCHAR(30) NOT NULL,
+                      updated_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                      INDEX idx_username (username)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
         }

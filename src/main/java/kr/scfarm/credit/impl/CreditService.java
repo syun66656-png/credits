@@ -5,10 +5,13 @@ import kr.scfarm.credit.db.CreditDao;
 import kr.scfarm.credit.redis.RedisManager;
 import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
 
+import java.util.Collection;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.function.Predicate;
 
 /**
  * {@link CreditAPI} 구현. DAO 의 동기 트랜잭션을 전용 실행자(비동기 스레드 풀) 위에서 실행하여
@@ -16,9 +19,15 @@ import java.util.concurrent.ExecutorService;
  *
  * <p>홈페이지 브릿지의 지급도 결국 DAO 의 동일 경로(잔액 UPSERT + 원장)를 타므로 지급 로직은 한 곳에만 존재한다.
  *
- * <p><b>캐시 정책:</b> 잔액의 진실원은 DB 이고 명령어(/크레딧)는 항상 DB 를 조회한다(무손실/정확 우선).
- * 아래 {@code cache} 는 동기적으로 값을 내놓아야 하는 PlaceholderAPI 전용 최적화이며,
- * 변경 시 무효화 + (선택)Redis Pub/Sub 브로드캐스트로 교차서버 스테일을 방지한다.
+ * <p><b>캐시 정책(PlayerPoints pointsCache 수명주기 반영):</b> 잔액의 진실원은 DB 이고
+ * 명령어(/크레딧)는 항상 DB 를 조회한다(무손실/정확 우선). 아래 {@code cache} 는 동기적으로 값을
+ * 내놓아야 하는 PlaceholderAPI 전용 최적화이며,
+ * <ul>
+ *   <li>{@code cacheEligible}(=온라인 여부)인 UUID 만 캐시에 담아 무한 증가를 막고(퇴장 시 리스너가 제거 —
+ *       PlayerPoints 의 bungee 업데이트 큐 무한 누적 버그 계열 예방),</li>
+ *   <li>주기 배치 리프레시({@link #refreshBalances})로 교차서버 스테일을 해소한다
+ *       (PlayerPoints 의 {@code refreshAfterWrite(cache-duration)} 에 해당).</li>
+ * </ul>
  */
 public final class CreditService implements CreditAPI {
 
@@ -26,20 +35,25 @@ public final class CreditService implements CreditAPI {
     private final ExecutorService executor;
     private final ComponentLogger logger;
     private final RedisManager redis; // nullable
+    private final Predicate<UUID> cacheEligible;
     private final ConcurrentHashMap<UUID, Long> cache = new ConcurrentHashMap<>();
 
-    public CreditService(CreditDao dao, ExecutorService executor, ComponentLogger logger, RedisManager redis) {
+    public CreditService(CreditDao dao, ExecutorService executor, ComponentLogger logger,
+                         RedisManager redis, Predicate<UUID> cacheEligible) {
         this.dao = dao;
         this.executor = executor;
         this.logger = logger;
         this.redis = redis;
+        this.cacheEligible = cacheEligible;
     }
 
     @Override
     public CompletableFuture<Long> getBalance(UUID uuid) {
         return async("getBalance", () -> {
             long bal = dao.getBalance(uuid);
-            cache.put(uuid, bal);
+            if (cacheEligible.test(uuid)) {
+                cache.put(uuid, bal);
+            }
             return bal;
         });
     }
@@ -89,29 +103,63 @@ public final class CreditService implements CreditAPI {
         });
     }
 
-    // ── PlaceholderAPI 지원(동기 조회용 캐시) ───────────────────────────────
+    // ── 캐시 수명주기 ───────────────────────────────────────────────────────
 
-    /** 캐시에 있으면 즉시 반환, 없으면 비동기 적재를 예약하고 null 반환. */
+    /** 캐시에 있으면 즉시 반환(PlaceholderAPI 동기 조회용), 없으면 비동기 적재를 예약하고 null 반환. */
     public Long peekCache(UUID uuid) {
         Long v = cache.get(uuid);
-        if (v == null) {
+        if (v == null && cacheEligible.test(uuid)) {
             getBalance(uuid); // 백그라운드 적재(결과는 캐시에 채워짐)
         }
         return v;
     }
 
-    /** 이 서버 로컬 캐시만 무효화(Redis 구독 콜백에서 호출). */
+    /** 접속 시 캐시 예열(리스너에서 호출). */
+    public void preload(UUID uuid) {
+        getBalance(uuid);
+    }
+
+    /** 이 서버 로컬 캐시만 무효화(퇴장 리스너/Redis 구독 콜백에서 호출). */
     public void invalidateLocal(UUID uuid) {
         cache.remove(uuid);
     }
 
-    /** 잔액 변경 후 처리: 로컬 캐시 무효화 → 재적재 → 교차서버 브로드캐스트. */
+    /**
+     * 외부 경로(홈페이지 브릿지 등)로 잔액이 바뀌었을 때 호출 — 캐시 무효화 + 재적재 + Redis 브로드캐스트.
+     * 브릿지 지급 직후 placeholder 가 옛 값을 보여주는 지연(PlayerPoints 의 "placeholder delay" 버그 계열)을 막는다.
+     */
+    public void notifyExternalChange(UUID uuid) {
+        onChanged(uuid);
+    }
+
+    /**
+     * 온라인 유저 잔액 일괄 리프레시(주기 태스크에서 호출, 쿼리 1번).
+     * 다른 서버에서 바뀐 잔액도 여기서 따라잡는다 — Redis 를 꺼도 placeholder 스테일이 이 주기로 수렴.
+     */
+    public CompletableFuture<Void> refreshBalances(Collection<UUID> uuids) {
+        if (uuids.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return async("refreshBalances", () -> {
+            Map<UUID, Long> balances = dao.getBalances(uuids);
+            for (Map.Entry<UUID, Long> e : balances.entrySet()) {
+                if (cacheEligible.test(e.getKey())) {
+                    cache.put(e.getKey(), e.getValue());
+                }
+            }
+            return null;
+        });
+    }
+
+    /** 잔액 변경 후 처리: 로컬 캐시 무효화 → 교차서버 브로드캐스트 → (온라인이면) 재적재. */
     private void onChanged(UUID uuid) {
         cache.remove(uuid);
         if (redis != null) {
             redis.publishInvalidate(uuid);
         }
-        // 최신값을 캐시에 다시 채워 둔다(다음 placeholder 조회 대비). 실패해도 무시.
+        if (!cacheEligible.test(uuid)) {
+            return; // 오프라인 유저는 캐시에 다시 담지 않는다(무한 증가 방지)
+        }
         executor.execute(() -> {
             try {
                 cache.put(uuid, dao.getBalance(uuid));

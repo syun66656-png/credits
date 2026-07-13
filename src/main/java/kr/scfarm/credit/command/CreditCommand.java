@@ -184,10 +184,10 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             return CompletableFuture.completedFuture(Optional.of(online.getUniqueId()));
         }
         OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(nick);
-        if (cached != null && cached.getUniqueId() != null) {
+        if (cached != null) {
             return CompletableFuture.completedFuture(Optional.of(cached.getUniqueId()));
         }
-        return names.uuidFromMojang(nick);
+        return names.resolveUuidOffline(nick); // DB 닉네임 캐시 → Mojang(비동기)
     }
 
     private CompletableFuture<Optional<String>> resolveName(UUID uuid) {
@@ -202,7 +202,7 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             names.cacheName(uuid, name);
             return CompletableFuture.completedFuture(Optional.of(name));
         }
-        return names.nameFromMojang(uuid);
+        return names.resolveNameOffline(uuid); // DB 닉네임 캐시 → Mojang(비동기)
     }
 
     // ── 탭완성(관리자에게만 서브명령어 노출) ─────────────────────────────────

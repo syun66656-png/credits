@@ -27,6 +27,12 @@ display:
   # 3자리마다 콤마
   thousands-separator: true
 
+cache:
+  # 온라인 유저 placeholder 캐시를 이 주기(초)로 일괄 갱신한다(배치 쿼리 1회, 비동기).
+  # 다른 서버에서 바뀐 잔액도 이 주기로 따라잡힌다(Redis 없이도). 0 이하 = 끔.
+  # 잔액의 진실원은 항상 DB 이며 /크레딧 명령어는 캐시를 쓰지 않는다.
+  refresh-seconds: 30
+
 redis:
   # 교차서버 캐시 무효화(선택). 끄면 캐시 없이 항상 DB 를 조회한다(무손실/정확 우선).
   # 켜려면 plugin.yml 의 libraries 에 lettuce-core 를 추가해야 한다.

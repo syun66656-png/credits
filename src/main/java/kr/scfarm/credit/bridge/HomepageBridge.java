@@ -13,6 +13,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * 홈페이지 결제 브릿지(명세 8번).
@@ -36,14 +37,18 @@ public final class HomepageBridge {
     private final CreditDao dao;
     private final ComponentLogger logger;
     private final HttpClient http;
+    /** 지급 성공 시 호출 — 캐시 무효화/Redis 브로드캐스트용(비동기 스레드에서 호출됨, Bukkit 금지). */
+    private final Consumer<UUID> onPaid;
 
-    public HomepageBridge(String baseUrl, String pluginKey, CreditDao dao, ComponentLogger logger) {
+    public HomepageBridge(String baseUrl, String pluginKey, CreditDao dao,
+                          ComponentLogger logger, Consumer<UUID> onPaid) {
         String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.pendingUrl = base + "/api/plugin/charges/pending";
         this.completeUrl = base + "/api/plugin/charges/complete";
         this.pluginKey = pluginKey;
         this.dao = dao;
         this.logger = logger;
+        this.onPaid = onPaid;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(HTTP_TIMEOUT)
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -126,7 +131,15 @@ public final class HomepageBridge {
         }
 
         switch (result) {
-            case PAID -> logger.info("홈페이지 결제 지급 완료: charge=" + chargeId + " amount=" + amount);
+            case PAID -> {
+                logger.info("홈페이지 결제 지급 완료: charge=" + chargeId + " amount=" + amount);
+                // 지급 직후 placeholder/캐시가 옛 값을 보여주지 않도록 즉시 통지
+                try {
+                    onPaid.accept(uuid);
+                } catch (Exception e) {
+                    logger.warn("지급 후 캐시 통지 실패(무시): " + e.getMessage());
+                }
+            }
             case ALREADY_PROCESSED -> { /* 이미 지급됨 — 조용히 보고만 재시도 */ }
             case FAILED -> {
                 return; // 보고하지 않음

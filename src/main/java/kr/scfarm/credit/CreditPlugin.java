@@ -6,6 +6,7 @@ import kr.scfarm.credit.command.CreditCommand;
 import kr.scfarm.credit.db.CreditDao;
 import kr.scfarm.credit.db.DatabaseManager;
 import kr.scfarm.credit.impl.CreditService;
+import kr.scfarm.credit.listener.PlayerCacheListener;
 import kr.scfarm.credit.placeholder.CreditPlaceholderExpansion;
 import kr.scfarm.credit.redis.RedisManager;
 import kr.scfarm.credit.resolver.NameResolver;
@@ -19,6 +20,7 @@ import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -78,6 +80,8 @@ public final class CreditPlugin extends JavaPlugin {
         int poolSize = Math.max(1, config.getInt("database.pool-size", 10));
         this.executor = Executors.newFixedThreadPool(poolSize, namedDaemonFactory());
 
+        CreditDao dao = new CreditDao(database);
+
         // 4) (선택) Redis 교차서버 캐시 무효화
         this.redis = null;
         ConfigurationSection redisSec = config.getConfigurationSection("redis");
@@ -100,14 +104,19 @@ public final class CreditPlugin extends JavaPlugin {
             }
         }
 
-        // 5) 크레딧 서비스 + 공개 API 등록(ServicesManager)
-        CreditDao dao = new CreditDao(database);
-        this.creditService = new CreditService(dao, executor, clog, redis);
+        // 5) 접속/퇴장 캐시 리스너 + 크레딧 서비스 + 공개 API 등록(ServicesManager)
+        //    placeholder 캐시는 온라인 유저만 담는다(무한 증가 방지 — PlayerPoints 캐시 수명주기 반영).
+        NameResolver names = new NameResolver(executor, dao, clog);
+        final PlayerCacheListener[] listenerRef = new PlayerCacheListener[1];
+        this.creditService = new CreditService(dao, executor, clog, redis,
+                uuid -> listenerRef[0] != null && listenerRef[0].onlineUuids().contains(uuid));
+        PlayerCacheListener cacheListener = new PlayerCacheListener(creditService, names);
+        listenerRef[0] = cacheListener;
+        getServer().getPluginManager().registerEvents(cacheListener, this);
         getServer().getServicesManager().register(CreditAPI.class, creditService, this, ServicePriority.Normal);
 
-        // 6) 메세지 + 이름 리졸버 + 명령어
+        // 6) 메세지 + 명령어
         Messages messages = loadMessages(config);
-        NameResolver names = new NameResolver(executor, clog);
         CreditCommand command = new CreditCommand(creditService, messages, names);
         if (getCommand("크레딧") != null) {
             getCommand("크레딧").setExecutor(command);
@@ -119,8 +128,21 @@ public final class CreditPlugin extends JavaPlugin {
         // 7) (선택) PlaceholderAPI
         registerPlaceholders(messages);
 
-        // 8) 홈페이지 결제 브릿지(비동기 폴링)
+        // 8) 홈페이지 결제 브릿지(비동기 폴링). 지급 성공 시 캐시/Redis 통지.
         startHomepageBridge(config, dao);
+
+        // 9) 온라인 유저 placeholder 캐시 주기 리프레시(배치 쿼리 1회, 비동기).
+        //    PlayerPoints 의 refreshAfterWrite(cache-duration) 에 해당 — Redis 없이도
+        //    다른 서버에서 바뀐 잔액이 이 주기로 따라잡힌다. 0 이하로 두면 끈다.
+        int refreshSeconds = config.getInt("cache.refresh-seconds", 30);
+        if (refreshSeconds > 0) {
+            getServer().getAsyncScheduler().runAtFixedRate(
+                    this,
+                    task -> creditService.refreshBalances(Set.copyOf(cacheListener.onlineUuids())),
+                    refreshSeconds,
+                    refreshSeconds,
+                    TimeUnit.SECONDS);
+        }
 
         getComponentLogger().info(net.kyori.adventure.text.Component.text("크레딧 활성화 완료.", ConsoleLog.OK));
     }
@@ -169,7 +191,8 @@ public final class CreditPlugin extends JavaPlugin {
             return;
         }
 
-        HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger());
+        HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger(),
+                uuid -> creditService.notifyExternalChange(uuid));
         // Paper 비동기 스케줄러: 메인 스레드를 절대 막지 않는다.
         getServer().getAsyncScheduler().runAtFixedRate(
                 this,

@@ -102,6 +102,24 @@ if (credit != null) {
 
 ---
 
+## PlayerPoints 소스·버그픽스 대조 반영 내역
+
+PlayerPoints 레포(커밋 히스토리 포함)를 실제로 클론해 대조했다. 대중적으로 검증되며 고쳐진 버그들을 다음과 같이 흡수했다:
+
+**흡수한 패턴/픽스**
+- **DB 닉네임 캐시 테이블** (`credit_username_cache`) — PlayerPoints `_2_Add_Table_Username_Cache` 마이그레이션 + `NameFetcher` 조회 사슬 패턴. 접속 시 UPSERT, 조회 성공 시 역기입. 멀티 백엔드 네트워크에서 "다른 서버로만 접속했던" 유저도 Mojang 호출 없이 닉네임↔UUID 해석. 닉변으로 같은 이름이 여러 UUID 에 남는 경우 **최근 갱신 우선**으로 택해 PlayerPoints 의 임의-1건 선택보다 안전.
+- **캐시 수명주기** (`pointsCache` 의 preload/expire/refresh 설계 + placeholder 지연 픽스 `1ee9c1c` + 큐 무한누적 픽스 `c031f8b` 교훈) — placeholder 캐시는 **온라인 유저만** 담고(퇴장 시 제거 → 무한 증가 불가), 접속 시 예열, `cache.refresh-seconds`(기본 30초) 주기의 배치 쿼리 1회로 일괄 갱신. Redis 없이도 교차서버 placeholder 스테일이 이 주기로 수렴. 홈페이지 브릿지 지급 직후에도 즉시 캐시 통지.
+- **동시 변경 잠금** (`ffebabf` "Lock on point modifications to prevent duplications" 의 DB 레벨 대응) — `pay` 는 행 잠금을 항상 UUID 사전순으로 획득해 상호 이체 데드락을 원천 차단하고, 모든 쓰기 트랜잭션에 데드락(1213/40001)·락 타임아웃(1205) 감지 시 짧은 백오프 재시도를 넣었다(트랜잭션이 자기완결적이라 재실행 안전).
+- **정확한 닉네임 매칭** (`740c39b` #83 — 부분일치로 엉뚱한 유저에게 지급되던 버그) — `getPlayerExact` + 정확 일치 DB 조회만 사용.
+- **HikariCP keepalive** — 유휴 커넥션이 방화벽/wait_timeout 에 조용히 끊겨 첫 연산이 실패하는 사고 방지(5분 ping).
+
+**우리가 이미 회피했거나 더 안전한 부분**
+- take 가 잔액을 0 으로 클램프하던 버그(`4664376` 로 그들이 거부 방식으로 수정) → 우리는 처음부터 조건부 UPDATE 거부.
+- 시작잔액 중복 지급(`b6921b0`) → 우리는 읽기 시 행을 만들지 않아 원천 면역.
+- importlegacy SQL 인젝션(`e874f4b`) → 전부 PreparedStatement.
+- 10틱 메모리 배칭 후 플러시(그들 구조, `639f48e` 로 계속 보강) → 크래시 시 유실 창이 존재하는 구조라 채택하지 않음. 우리는 연산마다 즉시 트랜잭션(무손실 우선, 명세 0번).
+- `NameFetcher` 가 아직 쓰는 **폐기된 Mojang `/user/profiles/<uuid>/names` 엔드포인트**는 답습하지 않고 현행 sessionserver 를 사용. 네거티브 캐싱(레이트리밋 방지)은 동일하게 채택.
+
 ## 명세와 다르게/추가로 결정한 사항
 
 - **지급/차감에 `<금액>` 필수 인자 추가** — 원문에는 생략돼 있었으나 논리상 필요.
