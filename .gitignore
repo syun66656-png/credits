@@ -1,0 +1,16 @@
+target/
+*.class
+
+# IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Maven
+.mvn/
+!.mvn/wrapper/maven-wrapper.properties
+
+# OS
+.DS_Store

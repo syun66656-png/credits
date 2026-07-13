@@ -1,0 +1,32 @@
+# 비밀정원(마인팜 네트워크) 크레딧 플러그인
+# name 은 콘솔/플러그인 목록에 "크레딧" 으로 표기된다. (JAR 파일명은 pom.xml 의 finalName 이 결정)
+name: 크레딧
+version: 1.0.0
+main: kr.scfarm.credit.CreditPlugin
+# Paper 26.x 호환 표기. api-version 은 Bukkit 호환 계약 표기이며 서버 빌드 버전과 별개다.
+api-version: '1.21'
+author: 마인팜
+description: 크레딧(캐시성 포인트) — MariaDB 단일 진실원, 전 연산 비동기, 홈페이지 결제 브릿지
+
+# 런타임 라이브러리: shade 하지 않고 서버가 Maven Central 에서 내려받는다(명세 1번).
+libraries:
+  - com.zaxxer:HikariCP:6.2.1
+  - org.mariadb.jdbc:mariadb-java-client:3.5.2
+  # Redis(교차서버 캐시 무효화)를 쓰려면 config.yml 의 redis.enabled=true 로 켜고 아래 주석을 해제한다.
+  # - io.lettuce:lettuce-core:6.5.5.RELEASE
+
+softdepend:
+  - PlaceholderAPI
+
+commands:
+  크레딧:
+    description: 크레딧 잔액 확인 및 관리
+    usage: /크레딧
+
+permissions:
+  credit.use:
+    description: 본인 크레딧 잔액 확인
+    default: true
+  credit.admin:
+    description: 크레딧 관리(확인/지급/차감/인증)
+    default: op

@@ -1,0 +1,39 @@
+# ============================================================
+#  크레딧 플러그인 설정
+#  - 잔액의 단일 진실원(source of truth)은 MariaDB 이다.
+#  - MariaDB 연결 실패 시 플러그인은 스스로 비활성화된다(깨진 DB 쓰기 방지).
+# ============================================================
+
+database:
+  host: "127.0.0.1"
+  port: 3306
+  name: "credit"
+  user: "root"
+  password: ""
+  # HikariCP 최대 커넥션 수. 비동기 크레딧 연산 스레드 풀 크기도 이 값에 맞춘다.
+  pool-size: 10
+
+homepage:
+  # 홈페이지 결제 브릿지. 오프라인/미접속 UUID 도 지급된다(UUID 기반 DB UPSERT).
+  base-url: "https://scfarm.kr"
+  # 홈페이지 운영자에게 받은 비밀키. 절대 로그/채팅에 노출하지 않는다.
+  plugin-key: "여기에_PLUGIN_API_KEY"
+  # 대기 중 결제 폴링 주기(초). 0 이하이면 브릿지를 끈다.
+  poll-interval-seconds: 60
+
+display:
+  # 금액 뒤 접미사(예: 원 / 크레딧)
+  suffix: "원"
+  # 3자리마다 콤마
+  thousands-separator: true
+
+redis:
+  # 교차서버 캐시 무효화(선택). 끄면 캐시 없이 항상 DB 를 조회한다(무손실/정확 우선).
+  # 켜려면 plugin.yml 의 libraries 에 lettuce-core 를 추가해야 한다.
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+  # 비밀번호가 없으면 빈 문자열
+  password: ""
+  # 잔액 변경 브로드캐스트 채널
+  channel: "credit:invalidate"

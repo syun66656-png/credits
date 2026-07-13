@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>kr.scfarm</groupId>
+    <artifactId>credit</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>크레딧</name>
+    <description>비밀정원(마인팜 네트워크) 자체 크레딧 플러그인 — MariaDB 단일 진실원, 전 연산 비동기, 홈페이지 결제 브릿지</description>
+
+    <properties>
+        <!-- 명세: Java 25 -->
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>papermc</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
+        </repository>
+        <!-- PlaceholderAPI(선택 softdepend)는 Maven Central 이 아닌 extendedclip 저장소에 있다. -->
+        <repository>
+            <id>placeholderapi</id>
+            <url>https://repo.extendedclip.com/releases/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!--
+          Paper API 26.2.
+          명세(1번): Paper는 26.1부터 서버 JAR 난독화를 폐기 → Mojang 매핑 그대로 사용.
+          따라서 paperweight / reobf / remap 을 절대 쓰지 않는다. paper-api provided 하나로 충분.
+          버전 범위 [26.2,26.3) = 26.2 라인의 최신 빌드를 자동 해석(다음 마이너로 넘어가지 않음).
+        -->
+        <dependency>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
+            <version>[26.2,26.3)</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+          런타임 라이브러리는 shade 하지 않는다(명세 1번).
+          plugin.yml 의 libraries: 로 서버가 런타임에 Maven Central 에서 내려받는다.
+          여기서는 compileOnly 로만 참조하여 컴파일만 가능하게 한다 → jar 가 작고 클래스 충돌이 없다.
+        -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>6.2.1</version>
+            <scope>compileOnly</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mariadb.jdbc</groupId>
+            <artifactId>mariadb-java-client</artifactId>
+            <version>3.5.2</version>
+            <scope>compileOnly</scope>
+        </dependency>
+
+        <!-- Redis(선택, 기본 off). redis.enabled=true 일 때만 사용. plugin.yml libraries 에 주석으로 안내. -->
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <version>6.5.5.RELEASE</version>
+            <scope>compileOnly</scope>
+        </dependency>
+
+        <!-- Gson: Paper 가 런타임에 항상 제공(provided). JSON 파싱에 사용(명세 7/8: 경량 파서 허용). -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- PlaceholderAPI(선택, softdepend). 없어도 동작. -->
+        <dependency>
+            <groupId>me.clip</groupId>
+            <artifactId>placeholderapi</artifactId>
+            <version>2.11.6</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- 명세(1번): 산출 JAR 이름에 버전/스피곳 접미사가 붙으면 안 된다 → 결과물은 그냥 "크레딧.jar" -->
+        <finalName>크레딧</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.0</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

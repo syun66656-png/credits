@@ -1,0 +1,34 @@
+# ============================================================
+#  플레이어 표시 문구 (전부 MiniMessage 템플릿)
+#  플레이스홀더: <amount>(콤마 포맷 적용값), <suffix>, <player>, <uuid>
+#  커스텀 태그: <glyph:이름>  →  아래 glyphs 섹션에서 정의한 문자를 삽입(폰트 지정 가능)
+# ============================================================
+
+balance-self:      "<gray>보유 크레딧: </gray><gold><amount></gold><gray><suffix></gray>"
+balance-other:     "<gray><player> 님의 크레딧: </gray><gold><amount></gold><gray><suffix></gray>"
+give-success:      "<green><player> 님에게 <amount><suffix> 지급 완료</green>"
+take-success:      "<green><player> 님에게서 <amount><suffix> 차감 완료</green>"
+take-insufficient: "<red>잔액이 부족합니다.</red>"
+verify-result:     "<gray>UUID <white><uuid></white> → 닉네임: </gray><yellow><player></yellow>"
+verify-notfound:   "<red>해당 UUID의 닉네임을 찾을 수 없습니다.</red>"
+player-not-found:  "<red>대상 플레이어를 찾을 수 없습니다.</red>"
+invalid-amount:    "<red>금액은 1 이상의 정수여야 합니다.</red>"
+invalid-uuid:      "<red>올바른 UUID 형식이 아닙니다.</red>"
+no-permission:     "<red>권한이 없습니다.</red>"
+player-only:       "<red>플레이어만 사용할 수 있습니다.</red>"
+db-error:          "<red>처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.</red>"
+
+# 관리자에게만 노출되는 사용법(권한 없는 플레이어에게는 첫 줄만 보인다)
+usage-user:        "<gray>사용법: /크레딧</gray>"
+usage-admin: |-
+  <gray>─── 크레딧 관리 ───</gray>
+  <gray>/크레딧 <white>— 본인 잔액</white></gray>
+  <gray>/크레딧 확인 <white><닉네임></white></gray>
+  <gray>/크레딧 지급 <white><닉네임> <금액></white></gray>
+  <gray>/크레딧 차감 <white><닉네임> <금액></white></gray>
+  <gray>/크레딧 인증 <white><uuid></white></gray>
+
+# 커스텀 글리프(비트맵 폰트) 태그 매핑. <glyph:coin> 처럼 사용.
+# name: "문자[|폰트키]"  — 폰트키 생략 시 default. 정의되지 않은 glyph 는 빈 문자열로 처리된다.
+glyphs:
+  coin: ""
