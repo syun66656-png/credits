@@ -101,8 +101,10 @@
     </dependencies>
 
     <build>
-        <!-- 명세(1번): 산출 JAR 이름에 버전/스피곳 접미사가 붙으면 안 된다 → 결과물은 그냥 "크레딧.jar" -->
-        <finalName>크레딧</finalName>
+        <!-- 산출 JAR 이름에 버전/스피곳 접미사가 붙으면 안 된다(명세 1번).
+             파일명은 한글 이슈를 피하려 영어 "Credit" 으로 고정 → 결과물은 "Credit.jar".
+             (콘솔/플러그인 목록 표기는 plugin.yml 의 name: 크레딧 그대로 한글로 나온다.) -->
+        <finalName>Credit</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

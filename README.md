@@ -16,7 +16,7 @@
 mvn clean package
 ```
 
-- 산출물: `target/크레딧.jar` (버전/스피곳 접미사 없음 — `pom.xml` 의 `finalName` 이 결정).
+- 산출물: `target/Credit.jar` (파일명은 한글 이슈 회피용 영어, 버전/스피곳 접미사 없음 — `pom.xml` 의 `finalName` 이 결정). 콘솔/플러그인 목록 표기는 `plugin.yml` 의 `name: 크레딧` 이라 한글로 나온다.
 - **paperweight / reobf / remap 미사용.** Paper 는 26.1부터 서버 JAR 난독화를 폐기했으므로 Mojang 매핑을 그대로 쓴다. `paper-api` provided 의존성 하나면 충분하다.
 - 런타임 라이브러리(HikariCP, MariaDB JDBC)는 shade 하지 않고 `plugin.yml` 의 `libraries:` 로 서버가 런타임에 Maven Central 에서 받는다. → jar 가 작고 클래스 충돌이 없다.
 
