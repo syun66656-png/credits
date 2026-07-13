@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * messages.yml 기반 표시 문구 렌더링. <b>플레이어에게 나가는 모든 문구는 여기(messages.yml)에서 수정 가능</b>하다.
@@ -27,9 +28,15 @@ import java.util.UUID;
  *   <li><b>PlaceholderAPI</b> — {@code %player_name%}, {@code %credit_balance%} 등 {@code %...%}.
  *       PAPI 가 설치돼 있고 플레이어 컨텍스트가 주어질 때, MiniMessage 파싱 <i>전에</i> 해석된다.
  *       (PAPI 확장이 메인 스레드를 가정할 수 있어, 컨텍스트를 넘기는 호출은 메인 스레드에서 해야 한다.)</li>
+ *   <li><b>Nexo shift</b> — {@code <shift:-2>} 처럼 쓰면 내부적으로 {@code %nexo_shift_-2%} 로 바꿔
+ *       PlaceholderAPI 를 통해 Nexo 가 실제 shift 유니코드로 치환한다. (PlaceholderAPI + Nexo 설치 필요)
+ *       우리 파서엔 {@code <shift>} 태그가 없어서, Nexo 가 확실히 제공하는 shift 플레이스홀더로 우회한다.</li>
  * </ul>
  */
 public final class Messages {
+
+    // Nexo 의 <shift:N> MiniMessage 태그 → PlaceholderAPI %nexo_shift_N% 로 변환(우리 파서엔 shift 태그가 없음).
+    private static final Pattern NEXO_SHIFT = Pattern.compile("<shift:(-?\\d+)>");
 
     private final MiniMessage mini;
     private final Map<String, String> raw = new HashMap<>();
@@ -146,6 +153,8 @@ public final class Messages {
             return Component.text("<missing message: " + key + ">");
         }
         if (papiEnabled && papi != null) {
+            // Nexo <shift:N> → %nexo_shift_N% 로 치환한 뒤 PAPI 로 실제 유니코드 해석.
+            template = NEXO_SHIFT.matcher(template).replaceAll("%nexo_shift_$1%");
             try {
                 template = PapiHook.apply(papi, template);
             } catch (Throwable ignored) {

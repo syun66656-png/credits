@@ -22,7 +22,8 @@ libraries:
   - io.lettuce:lettuce-core:6.5.5.RELEASE
 
 softdepend:
-  - PlaceholderAPI
+  - PlaceholderAPI   # 메세지 %...% 및 Nexo <shift:N> 우회(%nexo_shift_N%)에 필요
+  - Nexo             # <shift:N> shift 유니코드 제공(PlaceholderAPI 경유). 없으면 shift 만 미동작
 
 commands:
   크레딧:

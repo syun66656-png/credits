@@ -6,6 +6,9 @@
 #  ▶ PlaceholderAPI: %player_name% %credit_balance% 등 %...% 도 동작
 #      (PlaceholderAPI 설치 시. 메세지를 "보는 플레이어" 기준 해석)
 #  ▶ 커스텀 글리프: <glyph:이름> → 아래 glyphs 섹션 정의 문자 삽입(폰트 지정 가능)
+#  ▶ Nexo shift: <shift:-2> 처럼 그대로 사용 가능(PlaceholderAPI + Nexo 설치 시).
+#      내부적으로 %nexo_shift_-2% 로 바꿔 Nexo 가 실제 shift 유니코드로 치환한다.
+#      (Nexo 글리프는 우리 <glyph> 와 태그가 겹치므로, 글리프는 위 <glyph:이름> 또는 %nexo_글리프id% 사용)
 # ============================================================
 
 balance-self:      "<gray>보유 크레딧: </gray><gold><amount></gold><gray><suffix></gray>"
