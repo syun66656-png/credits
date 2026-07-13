@@ -21,6 +21,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -40,6 +41,7 @@ public final class CreditPlugin extends JavaPlugin {
     private ExecutorService executor;
     private RedisManager redis;
     private CreditService creditService;
+    private Messages messages;
 
     @Override
     public void onEnable() {
@@ -81,17 +83,23 @@ public final class CreditPlugin extends JavaPlugin {
         this.executor = Executors.newFixedThreadPool(poolSize, namedDaemonFactory());
 
         CreditDao dao = new CreditDao(database);
+        NameResolver names = new NameResolver(executor, dao, clog);
+        this.messages = loadMessages(config);
 
-        // 4) (선택) Redis 교차서버 캐시 무효화
+        // 4) (선택) Redis 교차서버 Pub/Sub — 캐시 무효화 + 자동충전 지급 알림 전파.
+        //    지급 알림 브로드캐스트를 받으면 "그 유저가 이 서버에 접속 중일 때만" 인게임 알림을 보낸다.
+        //    → 브릿지 서버가 1대여도 유저가 어느 백엔드에 있든 알림 도달. 플러그인 없는 서버(hub)는 자동 제외.
         this.redis = null;
         ConfigurationSection redisSec = config.getConfigurationSection("redis");
         if (redisSec != null && redisSec.getBoolean("enabled", false)) {
             try {
-                RedisManager rm = new RedisManager(redisSec, clog, uuid -> {
-                    if (creditService != null) {
-                        creditService.invalidateLocal(uuid);
-                    }
-                });
+                RedisManager rm = new RedisManager(redisSec, clog,
+                        uuid -> {
+                            if (creditService != null) {
+                                creditService.invalidateLocal(uuid);
+                            }
+                        },
+                        this::deliverChargeNotification);
                 boolean ok = rm.connect();
                 console.logConn("Redis", ok);
                 this.redis = ok ? rm : null;
@@ -106,7 +114,6 @@ public final class CreditPlugin extends JavaPlugin {
 
         // 5) 접속/퇴장 캐시 리스너 + 크레딧 서비스 + 공개 API 등록(ServicesManager)
         //    placeholder 캐시는 온라인 유저만 담는다(무한 증가 방지 — PlayerPoints 캐시 수명주기 반영).
-        NameResolver names = new NameResolver(executor, dao, clog);
         final PlayerCacheListener[] listenerRef = new PlayerCacheListener[1];
         this.creditService = new CreditService(dao, executor, clog, redis,
                 uuid -> listenerRef[0] != null && listenerRef[0].onlineUuids().contains(uuid));
@@ -115,8 +122,7 @@ public final class CreditPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(cacheListener, this);
         getServer().getServicesManager().register(CreditAPI.class, creditService, this, ServicePriority.Normal);
 
-        // 6) 메세지 + 명령어
-        Messages messages = loadMessages(config);
+        // 6) 명령어
         CreditCommand command = new CreditCommand(creditService, messages, names);
         if (getCommand("크레딧") != null) {
             getCommand("크레딧").setExecutor(command);
@@ -128,8 +134,8 @@ public final class CreditPlugin extends JavaPlugin {
         // 7) (선택) PlaceholderAPI
         registerPlaceholders(messages);
 
-        // 8) 홈페이지 결제 브릿지(비동기 폴링). 지급 성공 시 캐시/Redis 통지 + 온라인 유저 인게임 알림.
-        startHomepageBridge(config, dao, messages, cacheListener);
+        // 8) 홈페이지 결제 브릿지(비동기 폴링). 지급 성공 시 캐시/Redis 통지 + 인게임 알림 브로드캐스트.
+        startHomepageBridge(config, dao);
 
         // 9) 온라인 유저 placeholder 캐시 주기 리프레시(배치 쿼리 1회, 비동기).
         //    PlayerPoints 의 refreshAfterWrite(cache-duration) 에 해당 — Redis 없이도
@@ -173,8 +179,7 @@ public final class CreditPlugin extends JavaPlugin {
 
     // ── 헬퍼 ──────────────────────────────────────────────────────────────
 
-    private void startHomepageBridge(FileConfiguration config, CreditDao dao,
-                                     Messages messages, PlayerCacheListener cacheListener) {
+    private void startHomepageBridge(FileConfiguration config, CreditDao dao) {
         ConfigurationSection hp = config.getConfigurationSection("homepage");
         if (hp == null) {
             return;
@@ -202,17 +207,14 @@ public final class CreditPlugin extends JavaPlugin {
 
         HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger(),
                 (uuid, amount) -> {
+                    // 캐시 무효화 + (Redis 시) 교차서버 무효화 브로드캐스트
                     creditService.notifyExternalChange(uuid);
-                    // 온라인 유저 지급 알림 — 벨로시티 네트워크의 여러 백엔드 중 "이 플러그인이 설치된
-                    // 이 서버"에 접속 중인 경우에만 보낸다. 오프라인/타 백엔드 접속자는 조용히 지급만.
-                    // 온라인 판정은 자체 스레드세이프 셋(비동기 안전) → 실제 전송은 메인 스레드로 디스패치.
-                    if (cacheListener.onlineUuids().contains(uuid)) {
-                        getServer().getGlobalRegionScheduler().execute(this, () -> {
-                            org.bukkit.entity.Player p = getServer().getPlayer(uuid);
-                            if (p != null) { // 디스패치 사이에 퇴장했으면 조용히 스킵
-                                p.sendMessage(messages.amount("charge-received", amount));
-                            }
-                        });
+                    // 지급 알림: Redis 가 있으면 전 백엔드로 브로드캐스트(자기 포함) → 유저가 접속한 서버가 전달.
+                    //           없으면 브릿지 서버 로컬로만 전달(폴백).
+                    if (redis != null) {
+                        redis.publishChargeNotify(uuid, amount);
+                    } else {
+                        deliverChargeNotification(uuid, amount);
                     }
                 });
         // Paper 비동기 스케줄러: 메인 스레드를 절대 막지 않는다.
@@ -223,6 +225,20 @@ public final class CreditPlugin extends JavaPlugin {
                 interval,
                 TimeUnit.SECONDS);
         getComponentLogger().info("홈페이지 브릿지: " + interval + "초 주기 폴링 시작.");
+    }
+
+    /**
+     * 자동충전 지급 인게임 알림 전달. 브릿지 async 스레드 또는 Redis 구독 스레드에서 호출될 수 있으므로
+     * 실제 전송은 메인 스레드로 디스패치한다. {@code getPlayer(uuid)} 가 이 서버 접속자만 반환하므로,
+     * 네트워크 전체에서 유저가 접속한 바로 그 백엔드 1대만 실제로 알림을 보낸다(플러그인 없는 hub 는 자동 제외).
+     */
+    private void deliverChargeNotification(UUID uuid, long amount) {
+        getServer().getGlobalRegionScheduler().execute(this, () -> {
+            org.bukkit.entity.Player p = getServer().getPlayer(uuid);
+            if (p != null && messages != null) {
+                p.sendMessage(messages.amount("charge-received", amount));
+            }
+        });
     }
 
     private void registerPlaceholders(Messages messages) {

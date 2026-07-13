@@ -41,12 +41,19 @@ cache:
   refresh-seconds: 30
 
 redis:
-  # 교차서버 캐시 무효화(선택). 끄면 캐시 없이 항상 DB 를 조회한다(무손실/정확 우선).
-  # 켜려면 plugin.yml 의 libraries 에 lettuce-core 를 추가해야 한다.
+  # 교차서버 Pub/Sub(선택). 두 가지에 쓰인다:
+  #   1) 잔액 변경 시 다른 서버 placeholder 캐시 무효화
+  #   2) 자동충전 지급 알림을 전 백엔드로 브로드캐스트 → 유저가 접속한 서버가 인게임 알림 전달
+  #      (브릿지 서버가 1대여도 유저가 어느 백엔드에 있든 알림 도달. 플러그인 없는 hub 는 자동 제외)
+  # 끄면: 캐시 없이 DB 조회로 폴백 + 알림은 브릿지 서버 접속자에게만.
+  # 켜려면 plugin.yml 의 libraries 에서 lettuce-core 주석을 해제해야 한다.
+  # ※ 네트워크의 모든 크레딧 서버(main/sub1/sub2/minigame)가 같은 Redis 를 바라보게 설정할 것.
   enabled: false
   host: "127.0.0.1"
   port: 6379
   # 비밀번호가 없으면 빈 문자열
   password: ""
-  # 잔액 변경 브로드캐스트 채널
+  # 잔액 변경(캐시 무효화) 브로드캐스트 채널
   channel: "credit:invalidate"
+  # 자동충전 지급 알림 브로드캐스트 채널
+  notify-channel: "credit:notify"
