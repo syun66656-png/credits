@@ -1,5 +1,6 @@
 package kr.scfarm.credit.command;
 
+import kr.scfarm.credit.CreditPlugin;
 import kr.scfarm.credit.impl.CreditService;
 import kr.scfarm.credit.resolver.NameResolver;
 import kr.scfarm.credit.util.Messages;
@@ -10,7 +11,6 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
 
 import net.kyori.adventure.text.Component;
 
@@ -36,26 +36,32 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
 
     private static final String PERM_ADMIN = "credit.admin";
     private static final String PERM_USE = "credit.use";
-    private static final List<String> SUBCOMMANDS = List.of("확인", "지급", "차감", "인증");
+    private static final List<String> SUBCOMMANDS = List.of("확인", "지급", "차감", "인증", "리로드");
 
-    private final Plugin plugin;
+    private final CreditPlugin plugin;
     private final CreditService credit;
     private final Messages msg;
     private final NameResolver names;
 
-    public CreditCommand(Plugin plugin, CreditService credit, Messages msg, NameResolver names) {
+    public CreditCommand(CreditPlugin plugin, CreditService credit, Messages msg, NameResolver names) {
         this.plugin = plugin;
         this.credit = credit;
         this.msg = msg;
         this.names = names;
     }
 
-    /** 메세지 빌드(PAPI 해석 포함) + 전송을 메인 스레드에서 수행. 비동기 콜백에서도 안전. */
+    /** 메세지 빌드(PAPI 해석 포함) + 전송을 메인 스레드에서 수행. 비동기 콜백에서도 안전. 빈 메세지("")면 전송 생략. */
     private void reply(CommandSender sender, Supplier<Component> builder) {
+        Runnable send = () -> {
+            Component c = builder.get();
+            if (c != null) { // 값이 "" 인 메세지는 null → 전송하지 않음
+                sender.sendMessage(c);
+            }
+        };
         if (Bukkit.isPrimaryThread()) {
-            sender.sendMessage(builder.get());
+            send.run();
         } else {
-            plugin.getServer().getGlobalRegionScheduler().execute(plugin, () -> sender.sendMessage(builder.get()));
+            plugin.getServer().getGlobalRegionScheduler().execute(plugin, send);
         }
     }
 
@@ -71,9 +77,10 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             return true;
         }
 
-        // 서브명령어는 전부 관리자 전용
+        // 서브명령어는 전부 관리자 전용. 권한 없는(일반) 유저에게는 서브명령어가 "존재하지 않는 것처럼"
+        // 처리한다 — "권한이 없습니다" 로 기능 존재를 노출하지 않고, 없는 명령어 문구를 보낸다.
         if (!sender.hasPermission(PERM_ADMIN)) {
-            reply(sender, () -> msg.get("no-permission", papiOf(sender)));
+            reply(sender, () -> msg.get("unknown-command", papiOf(sender)));
             return true;
         }
 
@@ -83,9 +90,21 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             case "지급" -> handleGiveTake(sender, args, true);
             case "차감" -> handleGiveTake(sender, args, false);
             case "인증" -> handleVerify(sender, args);
+            case "리로드" -> handleReload(sender);
             default -> reply(sender, () -> msg.get("usage-admin", papiOf(sender)));
         }
         return true;
+    }
+
+    // /크레딧 리로드 — config.yml(표시설정) + messages.yml 다시 읽기
+    private void handleReload(CommandSender sender) {
+        try {
+            plugin.reloadMessages();
+            reply(sender, () -> msg.get("reload-success", papiOf(sender)));
+        } catch (Exception e) {
+            plugin.getComponentLogger().warn("리로드 실패", e);
+            reply(sender, () -> msg.get("reload-failed", papiOf(sender)));
+        }
     }
 
     // /크레딧 — 본인 잔액

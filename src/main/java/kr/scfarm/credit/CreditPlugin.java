@@ -250,8 +250,12 @@ public final class CreditPlugin extends JavaPlugin {
         getServer().getGlobalRegionScheduler().execute(this, () -> {
             org.bukkit.entity.Player p = getServer().getPlayer(uuid);
             if (p != null && messages != null) {
-                // 메인 스레드 → PAPI(%...%) 안전. <player> = 지급 대상 닉네임.
-                p.sendMessage(messages.playerAmount("charge-received", p, p.getName(), amount));
+                // 메인 스레드 → PAPI(%...%) 안전. <player> = 지급 대상 닉네임. 빈 메세지면 null → 전송 생략.
+                net.kyori.adventure.text.Component c =
+                        messages.playerAmount("charge-received", p, p.getName(), amount);
+                if (c != null) {
+                    p.sendMessage(c);
+                }
             }
         });
     }
@@ -266,6 +270,22 @@ public final class CreditPlugin extends JavaPlugin {
         } catch (Throwable t) {
             getComponentLogger().warn("PlaceholderAPI 확장 등록 실패(무시): " + t.getMessage());
         }
+    }
+
+    /**
+     * {@code /크레딧 리로드}: config.yml 의 표시 설정 + messages.yml 문구를 다시 읽어 즉시 반영한다.
+     * <b>메세지/표시 설정만</b> 재적재한다 — DB/Redis/브릿지 폴링 등 연결 설정은 안전을 위해 재시작이 필요하다
+     * (커넥션 풀·구독을 런타임에 갈아끼우다 유실이 나는 것보다, 재시작이 무손실 원칙에 맞다).
+     * 메인 스레드에서 호출된다(명령어 핸들러).
+     */
+    public void reloadMessages() {
+        reloadConfig();
+        FileConfiguration config = getConfig();
+        File file = new File(getDataFolder(), "messages.yml");
+        FileConfiguration messagesConfig = YamlConfiguration.loadConfiguration(file);
+        String suffix = config.getString("display.suffix", "원");
+        boolean comma = config.getBoolean("display.thousands-separator", true);
+        messages.reload(messagesConfig, suffix, comma);
     }
 
     private Messages loadMessages(FileConfiguration config) {

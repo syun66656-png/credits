@@ -38,22 +38,34 @@ public final class Messages {
     // Nexo 의 <shift:N> MiniMessage 태그 → PlaceholderAPI %nexo_shift_N% 로 변환(우리 파서엔 shift 태그가 없음).
     private static final Pattern NEXO_SHIFT = Pattern.compile("<shift:(-?\\d+)>");
 
-    private final MiniMessage mini;
-    private final Map<String, String> raw = new HashMap<>();
-    private final String suffix;
-    private final boolean thousandsSeparator;
+    // 아래 3개는 /크레딧 리로드 로 갱신되므로 non-final. papiEnabled 는 런타임에 안 바뀐다(PAPI 설치 여부).
+    private volatile MiniMessage mini;
+    private volatile Map<String, String> raw;
+    private volatile String suffix;
+    private volatile boolean thousandsSeparator;
     private final boolean papiEnabled;
 
     public Messages(FileConfiguration messagesConfig, String suffix, boolean thousandsSeparator, boolean papiEnabled) {
+        this.papiEnabled = papiEnabled;
+        load(messagesConfig, suffix, thousandsSeparator);
+    }
+
+    /** messages.yml + 표시설정을 다시 읽어 in-place 갱신한다(/크레딧 리로드). 모든 참조가 즉시 반영된다. */
+    public void reload(FileConfiguration messagesConfig, String suffix, boolean thousandsSeparator) {
+        load(messagesConfig, suffix, thousandsSeparator);
+    }
+
+    private void load(FileConfiguration messagesConfig, String suffix, boolean thousandsSeparator) {
         this.suffix = suffix;
         this.thousandsSeparator = thousandsSeparator;
-        this.papiEnabled = papiEnabled;
 
+        Map<String, String> newRaw = new HashMap<>();
         for (String key : messagesConfig.getKeys(false)) {
             if (messagesConfig.isString(key)) {
-                raw.put(key, messagesConfig.getString(key));
+                newRaw.put(key, messagesConfig.getString(key));
             }
         }
+        this.raw = newRaw;
 
         // 커스텀 글리프 태그: <glyph:이름> → glyphs.<이름> 에 정의된 "문자[|폰트키]" 를 삽입.
         Map<String, Component> glyphs = new HashMap<>();
@@ -144,13 +156,18 @@ public final class Messages {
     }
 
     /**
-     * 핵심 렌더러. PAPI 컨텍스트가 있으면 {@code %...%} 를 먼저 해석한 뒤 MiniMessage 로 파싱한다.
+     * 핵심 렌더러. 키가 없으면 {@code <missing message: key>} 를, 값이 빈 문자열이면 {@code null}(전송 안 함)을 반환한다.
+     * PAPI 컨텍스트가 있으면 {@code %...%} 및 {@code <shift:N>} 을 먼저 해석한 뒤 MiniMessage 로 파싱한다.
      * PAPI 해석 중 확장이 던지는 예외는 삼켜서(메세지 하나 때문에 흐름이 깨지지 않게) 원본 템플릿으로 진행한다.
      */
     public Component render(String key, OfflinePlayer papi, TagResolver... resolvers) {
         String template = raw.get(key);
         if (template == null) {
             return Component.text("<missing message: " + key + ">");
+        }
+        // 빈 문자열("")로 두면 해당 메세지를 완전히 끈다(전송 안 함). 예: unknown-command 를 조용히 처리.
+        if (template.isBlank()) {
+            return null;
         }
         if (papiEnabled && papi != null) {
             // Nexo <shift:N> → %nexo_shift_N% 로 치환한 뒤 PAPI 로 실제 유니코드 해석.
