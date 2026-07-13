@@ -1,6 +1,11 @@
 # 비밀정원(마인팜 네트워크) 크레딧 플러그인
-# name 은 콘솔/플러그인 목록에 "크레딧" 으로 표기된다. (JAR 파일명은 pom.xml 의 finalName 이 결정)
-name: 크레딧
+# ※ Bukkit 은 플러그인 name 에 한글(비ASCII)을 허용하지 않는다([A-Za-z0-9 _.-] 만 가능).
+#   그래서 name 은 영어 Credit 로 둔다. 한글 브랜딩은 그대로 유지된다:
+#     - 우리 커스텀 색상 콘솔 로그: "크레딧 - MariaDB 연결 성공" (ConsoleLog 가 찍는 문구)
+#     - 인게임 명령어: /크레딧
+#     - 플레이어 메세지: messages.yml (한글)
+#   Paper 자체가 찍는 플러그인 목록/로그 접두어([Credit])만 영어로 나온다.
+name: Credit
 version: 1.0.0
 main: kr.scfarm.credit.CreditPlugin
 # Paper 26.x 호환 표기. api-version 은 Bukkit 호환 계약 표기이며 서버 빌드 버전과 별개다.
