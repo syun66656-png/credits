@@ -92,6 +92,7 @@ if (credit != null) {
   `INSERT processed_charge`(PK 충돌 = 이미 처리 → 재지급 안 함) + `UPSERT balance += amount` + `INSERT ledger(HOMEPAGE_CHARGE)`.
 - 지급/스킵 무관하게 `POST /api/plugin/charges/complete {"id":...}` 로 보고(멱등). 보고 실패 시 다음 폴링에 재보고되어 수렴.
 - **오프라인/미접속 UUID 도 지급된다**(UUID 기반 UPSERT — `Bukkit.getPlayer` 를 요구하지 않음). 네트워크 오류 → 다음 폴링 재시도, 401 → 키 오류 로그, DB 실패 → 보고 보류.
+- **지급 알림:** 벨로시티 네트워크의 여러 백엔드 중 **이 플러그인이 설치된 서버에 접속 중인 유저에게만** 지급 직후 인게임 알림(`charge-received` 메세지)을 보낸다. 오프라인/타 백엔드 접속자는 조용히 지급만 되고 별도 알림은 없다(잔액은 즉시 반영, `/크레딧` 으로 확인).
 - 명세 7번(제재 동기화)은 이번 범위 밖. HTTP/헤더 구조만 재사용 가능하게 두었다.
 
 ---

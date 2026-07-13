@@ -9,6 +9,7 @@ balance-other:     "<gray><player> 님의 크레딧: </gray><gold><amount></gold
 give-success:      "<green><player> 님에게 <amount><suffix> 지급 완료</green>"
 take-success:      "<green><player> 님에게서 <amount><suffix> 차감 완료</green>"
 take-insufficient: "<red>잔액이 부족합니다.</red>"
+charge-received:   "<green>홈페이지 충전 </green><gold><amount></gold><green><suffix>이 지급되었습니다.</green>"
 verify-result:     "<gray>UUID <white><uuid></white> → 닉네임: </gray><yellow><player></yellow>"
 verify-notfound:   "<red>해당 UUID의 닉네임을 찾을 수 없습니다.</red>"
 player-not-found:  "<red>대상 플레이어를 찾을 수 없습니다.</red>"

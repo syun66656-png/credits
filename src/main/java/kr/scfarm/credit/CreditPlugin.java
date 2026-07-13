@@ -128,8 +128,8 @@ public final class CreditPlugin extends JavaPlugin {
         // 7) (선택) PlaceholderAPI
         registerPlaceholders(messages);
 
-        // 8) 홈페이지 결제 브릿지(비동기 폴링). 지급 성공 시 캐시/Redis 통지.
-        startHomepageBridge(config, dao);
+        // 8) 홈페이지 결제 브릿지(비동기 폴링). 지급 성공 시 캐시/Redis 통지 + 온라인 유저 인게임 알림.
+        startHomepageBridge(config, dao, messages, cacheListener);
 
         // 9) 온라인 유저 placeholder 캐시 주기 리프레시(배치 쿼리 1회, 비동기).
         //    PlayerPoints 의 refreshAfterWrite(cache-duration) 에 해당 — Redis 없이도
@@ -173,7 +173,8 @@ public final class CreditPlugin extends JavaPlugin {
 
     // ── 헬퍼 ──────────────────────────────────────────────────────────────
 
-    private void startHomepageBridge(FileConfiguration config, CreditDao dao) {
+    private void startHomepageBridge(FileConfiguration config, CreditDao dao,
+                                     Messages messages, PlayerCacheListener cacheListener) {
         ConfigurationSection hp = config.getConfigurationSection("homepage");
         if (hp == null) {
             return;
@@ -192,7 +193,20 @@ public final class CreditPlugin extends JavaPlugin {
         }
 
         HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger(),
-                uuid -> creditService.notifyExternalChange(uuid));
+                (uuid, amount) -> {
+                    creditService.notifyExternalChange(uuid);
+                    // 온라인 유저 지급 알림 — 벨로시티 네트워크의 여러 백엔드 중 "이 플러그인이 설치된
+                    // 이 서버"에 접속 중인 경우에만 보낸다. 오프라인/타 백엔드 접속자는 조용히 지급만.
+                    // 온라인 판정은 자체 스레드세이프 셋(비동기 안전) → 실제 전송은 메인 스레드로 디스패치.
+                    if (cacheListener.onlineUuids().contains(uuid)) {
+                        getServer().getGlobalRegionScheduler().execute(this, () -> {
+                            org.bukkit.entity.Player p = getServer().getPlayer(uuid);
+                            if (p != null) { // 디스패치 사이에 퇴장했으면 조용히 스킵
+                                p.sendMessage(messages.amount("charge-received", amount));
+                            }
+                        });
+                    }
+                });
         // Paper 비동기 스케줄러: 메인 스레드를 절대 막지 않는다.
         getServer().getAsyncScheduler().runAtFixedRate(
                 this,

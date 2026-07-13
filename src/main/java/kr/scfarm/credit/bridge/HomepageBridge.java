@@ -13,7 +13,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.UUID;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 /**
  * 홈페이지 결제 브릿지(명세 8번).
@@ -37,11 +37,14 @@ public final class HomepageBridge {
     private final CreditDao dao;
     private final ComponentLogger logger;
     private final HttpClient http;
-    /** 지급 성공 시 호출 — 캐시 무효화/Redis 브로드캐스트용(비동기 스레드에서 호출됨, Bukkit 금지). */
-    private final Consumer<UUID> onPaid;
+    /**
+     * 지급 성공 시 (uuid, amount) 로 호출 — 캐시 무효화/Redis 브로드캐스트/온라인 알림용.
+     * 비동기 스레드에서 호출되므로 구현측에서 Bukkit 이 필요하면 메인 스레드로 디스패치해야 한다.
+     */
+    private final BiConsumer<UUID, Long> onPaid;
 
     public HomepageBridge(String baseUrl, String pluginKey, CreditDao dao,
-                          ComponentLogger logger, Consumer<UUID> onPaid) {
+                          ComponentLogger logger, BiConsumer<UUID, Long> onPaid) {
         String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.pendingUrl = base + "/api/plugin/charges/pending";
         this.completeUrl = base + "/api/plugin/charges/complete";
@@ -133,11 +136,11 @@ public final class HomepageBridge {
         switch (result) {
             case PAID -> {
                 logger.info("홈페이지 결제 지급 완료: charge=" + chargeId + " amount=" + amount);
-                // 지급 직후 placeholder/캐시가 옛 값을 보여주지 않도록 즉시 통지
+                // 지급 직후 캐시 통지 + (이 백엔드에 접속 중이면) 인게임 알림
                 try {
-                    onPaid.accept(uuid);
+                    onPaid.accept(uuid, amount);
                 } catch (Exception e) {
-                    logger.warn("지급 후 캐시 통지 실패(무시): " + e.getMessage());
+                    logger.warn("지급 후 통지 실패(무시): " + e.getMessage());
                 }
             }
             case ALREADY_PROCESSED -> { /* 이미 지급됨 — 조용히 보고만 재시도 */ }
