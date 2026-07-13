@@ -295,7 +295,9 @@ public final class CreditPlugin extends JavaPlugin {
         boolean comma = config.getBoolean("display.thousands-separator", true);
         // PlaceholderAPI(softdepend)가 설치돼 있으면 메세지에서 %...% 를 해석한다.
         boolean papi = getServer().getPluginManager().getPlugin("PlaceholderAPI") != null;
-        return new Messages(messagesConfig, suffix, comma, papi);
+        // Nexo(softdepend)가 설치돼 있으면 메세지를 Nexo MiniMessage 로 파싱해 <glyph>/<shift> 등을 지원한다.
+        boolean nexo = getServer().getPluginManager().getPlugin("Nexo") != null;
+        return new Messages(messagesConfig, suffix, comma, papi, nexo);
     }
 
     private void saveDefaultResource(String name) {

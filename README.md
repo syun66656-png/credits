@@ -44,6 +44,8 @@ mvn clean package
 
 > PAPI 확장이 메인 스레드를 가정할 수 있어, 명령어 응답은 DB 조회(비동기) 후 **메인 스레드에서 메세지 빌드·전송**한다(TPS 영향 없음). 자동충전 지급 알림(`charge-received`)도 메인 스레드 전송이라 `%...%` 가 안전하게 동작한다.
 
+**Nexo 태그 (`<glyph:...>`, `<shift:...>`):** Nexo 가 설치돼 있으면 메세지를 **Nexo 의 MiniMessage 로 파싱**해 `<glyph:info>`·`<shift:-2>` 등 Nexo 태그가 그대로 렌더된다(우리 `<amount>`/`<suffix>`/`<player>` 도 함께 동작). Nexo API 를 리플렉션으로 호출하므로 컴파일 의존성이 없고, Nexo 미설치/버전 상이 시 자체 MiniMessage 로 안전하게 폴백한다. 단 Nexo 가 있으면 우리 자체 `glyphs:` 섹션(`<glyph>`)은 Nexo 글리프에 밀려 사용되지 않는다.
+
 ---
 
 ## 명령어 / 권한

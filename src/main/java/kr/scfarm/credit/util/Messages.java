@@ -44,9 +44,13 @@ public final class Messages {
     private volatile String suffix;
     private volatile boolean thousandsSeparator;
     private final boolean papiEnabled;
+    private final boolean nexoEnabled;
 
-    public Messages(FileConfiguration messagesConfig, String suffix, boolean thousandsSeparator, boolean papiEnabled) {
+    public Messages(FileConfiguration messagesConfig, String suffix, boolean thousandsSeparator,
+                    boolean papiEnabled, boolean nexoEnabled) {
         this.papiEnabled = papiEnabled;
+        // Nexo 가 설치돼 있고 리플렉션으로 파서를 찾았을 때만 Nexo 파싱 경로를 쓴다.
+        this.nexoEnabled = nexoEnabled && NexoHook.available();
         load(messagesConfig, suffix, thousandsSeparator);
     }
 
@@ -170,12 +174,21 @@ public final class Messages {
             return null;
         }
         if (papiEnabled && papi != null) {
-            // Nexo <shift:N> → %nexo_shift_N% 로 치환한 뒤 PAPI 로 실제 유니코드 해석.
+            // Nexo 파서를 쓰지 않는 경우(예: Nexo 미설치 + PAPI 만)에도 shift 가 동작하도록,
+            // <shift:N> → %nexo_shift_N% 로 치환한 뒤 PAPI 로 유니코드 해석(폴백 경로).
             template = NEXO_SHIFT.matcher(template).replaceAll("%nexo_shift_$1%");
             try {
                 template = PapiHook.apply(papi, template);
             } catch (Throwable ignored) {
                 // PAPI 확장 오류는 무시하고 원본 템플릿으로 진행
+            }
+        }
+        // Nexo 설치 시: Nexo MiniMessage 로 파싱 → <glyph:...>·<shift:...> 등 Nexo 태그가 네이티브로 렌더된다.
+        // (우리 <amount>/<suffix>/<player> 리졸버도 함께 전달. 실패 시 아래 자체 파서로 폴백)
+        if (nexoEnabled) {
+            Component nexo = NexoHook.parse(template, resolvers);
+            if (nexo != null) {
+                return nexo;
             }
         }
         return mini.deserialize(template, resolvers);
