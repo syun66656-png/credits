@@ -81,7 +81,7 @@ if (credit != null) {
 
 - `credit_balance` — 잔액(단일 진실원).
 - `credit_ledger` — append-only 원장(모든 증감 이력, 감사/복구용).
-- `credit_processed_charge` — 홈페이지 결제 멱등성(charge_id PK 로 중복 지급 차단) + **분쟁 방지 감사 기록**: 자동충전 1건당 charge_id·UUID·닉네임·지급액·**지급 전 잔액·지급 후 잔액**·처리 시각을 지급 트랜잭션 안에서 확정해 한 행에 보존한다(지급과 기록이 원자적 — 반쪽 기록 불가). 같은 내용이 서버 로그 파일에도 `[크레딧 자동충전]` 라인으로 남는다.
+- `credit_processed_charge` — 홈페이지 결제 멱등성(charge_id PK 로 중복 지급 차단) + **분쟁 방지 감사 기록**: 자동충전 1건당 charge_id·UUID·닉네임·지급액·**지급 전 잔액·지급 후 잔액**·처리 시각을 지급 트랜잭션 안에서 확정해 한 행에 보존한다(지급과 기록이 원자적 — 반쪽 기록 불가). 같은 내용이 **3중**으로 남는다: ① DB(이 테이블) ② 서버 로그 `[크레딧 자동충전]` 라인 ③ **플러그인 폴더 yml** `plugins/Credit/charge-logs/charges-YYYY-MM.yml`(append-only, 사람이 바로 열람). yml 은 실제 지급 서버(브릿지)에서만 기록되며 `homepage.charge-log-file: false` 로 끌 수 있다.
 - `credit_username_cache` — 닉네임 캐시(접속 시 갱신).
 
 지급 = 원자적 UPSERT + 원장(같은 트랜잭션). 차감 = 조건부 `UPDATE ... WHERE balance >= ?`(영향 행 0 = 잔액 부족 → false). 시작 시 스키마 자동 생성.

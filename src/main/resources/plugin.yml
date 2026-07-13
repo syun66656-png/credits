@@ -17,8 +17,9 @@ description: 크레딧(캐시성 포인트) — MariaDB 단일 진실원, 전 �
 libraries:
   - com.zaxxer:HikariCP:6.2.1
   - org.mariadb.jdbc:mariadb-java-client:3.5.2
-  # Redis(교차서버 캐시 무효화)를 쓰려면 config.yml 의 redis.enabled=true 로 켜고 아래 주석을 해제한다.
-  # - io.lettuce:lettuce-core:6.5.5.RELEASE
+  # Redis(교차서버 캐시 무효화 + 지급 알림 브로드캐스트). config.yml 의 redis.enabled=true 로 켠다.
+  # 사용하지 않을 서버에서는 이 줄을 지워도 되지만, 남겨둬도 redis.enabled=false 면 로드만 하고 쓰지 않는다.
+  - io.lettuce:lettuce-core:6.5.5.RELEASE
 
 softdepend:
   - PlaceholderAPI

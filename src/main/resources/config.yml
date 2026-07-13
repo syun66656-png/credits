@@ -27,6 +27,9 @@ homepage:
   plugin-key: "여기에_PLUGIN_API_KEY"
   # 대기 중 결제 폴링 주기(초). 0 이하이면 브릿지를 끈다.
   poll-interval-seconds: 60
+  # 지급 로그를 플러그인 폴더(plugins/Credit/charge-logs/charges-YYYY-MM.yml)에도 남긴다.
+  # 실제 지급이 일어나는 브릿지 서버에서만 기록된다(DB/서버로그에 더한 사람이 읽기 쉬운 보조 기록).
+  charge-log-file: true
 
 display:
   # 금액 뒤 접미사(예: 원 / 크레딧)

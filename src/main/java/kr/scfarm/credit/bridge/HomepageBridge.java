@@ -42,9 +42,11 @@ public final class HomepageBridge {
      * 비동기 스레드에서 호출되므로 구현측에서 Bukkit 이 필요하면 메인 스레드로 디스패치해야 한다.
      */
     private final BiConsumer<UUID, Long> onPaid;
+    /** 지급 로그 yml 파일(플러그인 폴더). null 이면 파일 로그 미기록. */
+    private final ChargeLogFile chargeLog;
 
     public HomepageBridge(String baseUrl, String pluginKey, CreditDao dao,
-                          ComponentLogger logger, BiConsumer<UUID, Long> onPaid) {
+                          ComponentLogger logger, BiConsumer<UUID, Long> onPaid, ChargeLogFile chargeLog) {
         String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.pendingUrl = base + "/api/plugin/charges/pending";
         this.completeUrl = base + "/api/plugin/charges/complete";
@@ -52,6 +54,7 @@ public final class HomepageBridge {
         this.dao = dao;
         this.logger = logger;
         this.onPaid = onPaid;
+        this.chargeLog = chargeLog;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(HTTP_TIMEOUT)
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -152,6 +155,11 @@ public final class HomepageBridge {
                         + " 지급액=" + amount
                         + " 지급전=" + outcome.balanceBefore()
                         + " 지급후=" + outcome.balanceAfter());
+                // 플러그인 폴더 안 yml 파일에도 기록(사람이 바로 열어볼 수 있는 append-only 로그)
+                if (chargeLog != null) {
+                    chargeLog.append(chargeId, uuid, nickname, amount,
+                            outcome.balanceBefore(), outcome.balanceAfter());
+                }
                 // 지급 직후 캐시 통지 + (이 백엔드에 접속 중이면) 인게임 알림
                 try {
                     onPaid.accept(uuid, amount);

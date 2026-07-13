@@ -1,6 +1,7 @@
 package kr.scfarm.credit;
 
 import kr.scfarm.credit.api.CreditAPI;
+import kr.scfarm.credit.bridge.ChargeLogFile;
 import kr.scfarm.credit.bridge.HomepageBridge;
 import kr.scfarm.credit.command.CreditCommand;
 import kr.scfarm.credit.db.CreditDao;
@@ -205,6 +206,11 @@ public final class CreditPlugin extends JavaPlugin {
             return;
         }
 
+        // 지급 로그 yml 파일(플러그인 폴더). homepage.charge-log-file: false 로 끌 수 있음(기본 켜짐).
+        ChargeLogFile chargeLog = hp.getBoolean("charge-log-file", true)
+                ? new ChargeLogFile(getDataFolder(), getComponentLogger())
+                : null;
+
         HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger(),
                 (uuid, amount) -> {
                     // 캐시 무효화 + (Redis 시) 교차서버 무효화 브로드캐스트
@@ -216,7 +222,7 @@ public final class CreditPlugin extends JavaPlugin {
                     } else {
                         deliverChargeNotification(uuid, amount);
                     }
-                });
+                }, chargeLog);
         // Paper 비동기 스케줄러: 메인 스레드를 절대 막지 않는다.
         getServer().getAsyncScheduler().runAtFixedRate(
                 this,
@@ -225,6 +231,14 @@ public final class CreditPlugin extends JavaPlugin {
                 interval,
                 TimeUnit.SECONDS);
         getComponentLogger().info("홈페이지 브릿지: " + interval + "초 주기 폴링 시작.");
+        // 지급 알림 도달 범위를 콘솔에 명시(다중 백엔드 진단용).
+        if (redis != null) {
+            getComponentLogger().info("지급 알림: Redis 브로드캐스트 활성 → 유저가 접속한 어느 백엔드든 알림 전달.");
+        } else {
+            getComponentLogger().warn("지급 알림: Redis 미사용 → 이 브릿지 서버 접속자에게만 알림. "
+                    + "다른 백엔드에서도 알림을 받으려면 모든 서버에 redis.enabled: true + plugin.yml 의 "
+                    + "lettuce-core 라이브러리를 활성화하세요.");
+        }
     }
 
     /**
