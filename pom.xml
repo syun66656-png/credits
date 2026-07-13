@@ -45,6 +45,19 @@
         </dependency>
 
         <!--
+          slf4j-api: Paper 의 ComponentLogger(getComponentLogger())가 org.slf4j.Logger 를 상속하므로
+          info()/warn() 등 메서드 해석에 slf4j 가 컴파일 클래스패스에 있어야 한다. 보통 paper-api 가
+          전이로 딸려오지만, 로컬에 따라 누락되면 "cannot access org.slf4j.Logger" 컴파일 에러가 난다.
+          런타임은 Paper 가 제공하므로 provided. (버전은 컴파일용일 뿐 런타임엔 Paper 것이 쓰인다)
+        -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
           런타임 라이브러리는 shade 하지 않는다(명세 1번).
           plugin.yml 의 libraries: 로 서버가 런타임에 Maven Central 에서 내려받는다.
           여기서는 compileOnly 로만 참조하여 컴파일만 가능하게 한다 → jar 가 작고 클래스 충돌이 없다.
