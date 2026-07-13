@@ -3,7 +3,7 @@ package kr.scfarm.credit.bridge;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import kr.scfarm.credit.db.ChargeResult;
+import kr.scfarm.credit.db.ChargeOutcome;
 import kr.scfarm.credit.db.CreditDao;
 import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
 
@@ -123,19 +123,35 @@ public final class HomepageBridge {
             logger.warn("결제 건 " + chargeId + " 필드 오류(uuid/amount). 건너뜁니다.");
             return;
         }
-
-        ChargeResult result;
+        // 닉네임은 참고용(감사 기록·로그). 지급 키는 항상 uuid — 없거나 이상해도 지급엔 영향 없음.
+        String nickname = null;
         try {
-            result = dao.processCharge(chargeId, uuid, amount);
+            if (charge.has("nickname") && !charge.get("nickname").isJsonNull()) {
+                nickname = charge.get("nickname").getAsString();
+            }
+        } catch (Exception ignored) {
+            // 닉네임 파싱 실패는 무시
+        }
+
+        ChargeOutcome outcome;
+        try {
+            outcome = dao.processCharge(chargeId, uuid, nickname, amount);
         } catch (Exception e) {
             // DB 오류 → 지급 실패로 간주. processed 기록/보고 하지 않고 다음 폴링에 재시도.
             logger.warn("결제 건 " + chargeId + " 지급 트랜잭션 실패(재시도 예정): " + e.getMessage());
             return;
         }
 
-        switch (result) {
+        switch (outcome.status()) {
             case PAID -> {
-                logger.info("홈페이지 결제 지급 완료: charge=" + chargeId + " amount=" + amount);
+                // 분쟁 방지 감사 로그 — DB(credit_processed_charge/credit_ledger)와 동일 내용을
+                // 서버 로그 파일에도 남긴다(시간은 로그 타임스탬프 + DB processed_at 양쪽 보존).
+                logger.info("[크레딧 자동충전] charge=" + chargeId
+                        + " 닉네임=" + (nickname == null ? "?" : nickname)
+                        + " uuid=" + uuid
+                        + " 지급액=" + amount
+                        + " 지급전=" + outcome.balanceBefore()
+                        + " 지급후=" + outcome.balanceAfter());
                 // 지급 직후 캐시 통지 + (이 백엔드에 접속 중이면) 인게임 알림
                 try {
                     onPaid.accept(uuid, amount);

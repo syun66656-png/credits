@@ -83,14 +83,29 @@ public final class DatabaseManager {
                       INDEX idx_created (created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
-            // 홈페이지 결제 멱등성(정확히 한 번 지급)
+            // 홈페이지 결제 멱등성(정확히 한 번 지급) + 분쟁 방지 감사 기록.
+            // 자동충전 1건당 1행: 지급 전/후 잔액, 지급액, 닉네임, 처리 시각을 지급 트랜잭션 안에서 그대로 보존.
             st.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS credit_processed_charge (
-                      charge_id    VARCHAR(64) NOT NULL PRIMARY KEY,
-                      uuid         CHAR(36)    NOT NULL,
-                      amount       BIGINT      NOT NULL,
-                      processed_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+                      charge_id      VARCHAR(64) NOT NULL PRIMARY KEY,
+                      uuid           CHAR(36)    NOT NULL,
+                      nickname       VARCHAR(30) NULL,
+                      amount         BIGINT      NOT NULL,
+                      balance_before BIGINT      NULL,
+                      balance_after  BIGINT      NULL,
+                      processed_at   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      INDEX idx_charge_uuid (uuid),
+                      INDEX idx_processed_at (processed_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """);
+            // 구버전 스키마에서 올라온 경우 감사 컬럼/인덱스 보강(MariaDB 10.2+ IF NOT EXISTS 지원)
+            st.executeUpdate("""
+                    ALTER TABLE credit_processed_charge
+                      ADD COLUMN IF NOT EXISTS nickname       VARCHAR(30) NULL AFTER uuid,
+                      ADD COLUMN IF NOT EXISTS balance_before BIGINT      NULL AFTER amount,
+                      ADD COLUMN IF NOT EXISTS balance_after  BIGINT      NULL AFTER balance_before,
+                      ADD INDEX  IF NOT EXISTS idx_charge_uuid (uuid),
+                      ADD INDEX  IF NOT EXISTS idx_processed_at (processed_at)
                     """);
             // 닉네임 캐시(UUID↔닉네임, 접속 시 갱신). PlayerPoints 의 username_cache 테이블 패턴:
             // 멀티 백엔드 네트워크에서 "다른 서버로만 접속했던" 유저도 닉네임/UUID 해석이 가능해진다.

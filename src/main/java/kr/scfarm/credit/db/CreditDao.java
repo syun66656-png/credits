@@ -33,7 +33,10 @@ public final class CreditDao {
     private static final String SQL_LEDGER_INSERT =
             "INSERT INTO credit_ledger (uuid, delta, balance_after, reason, ref) VALUES (?, ?, ?, ?, ?)";
     private static final String SQL_PROCESSED_INSERT =
-            "INSERT INTO credit_processed_charge (charge_id, uuid, amount) VALUES (?, ?, ?)";
+            "INSERT INTO credit_processed_charge (charge_id, uuid, nickname, amount) VALUES (?, ?, ?, ?)";
+    // 지급 트랜잭션 안에서 확정된 전/후 잔액을 같은 행에 남긴다(분쟁 방지 감사 기록)
+    private static final String SQL_PROCESSED_AUDIT =
+            "UPDATE credit_processed_charge SET balance_before = ?, balance_after = ? WHERE charge_id = ?";
     // 닉네임 캐시(PlayerPoints username_cache 패턴). 닉변으로 같은 이름이 여러 UUID 에 남을 수 있으므로
     // 이름→UUID 는 가장 최근 기록을 택한다(PlayerPoints 는 임의 1건이라 닉변 시 오지급 여지가 있었음 — 개선).
     private static final String SQL_USERNAME_UPSERT =
@@ -222,22 +225,25 @@ public final class CreditDao {
     }
 
     /**
-     * 홈페이지 결제 1건을 "정확히 한 번" 지급. 단일 트랜잭션:
+     * 홈페이지 결제 1건을 "정확히 한 번" 지급 + 분쟁 방지 감사 기록. 단일 트랜잭션:
      * <pre>
-     *   INSERT processed_charge(charge_id,...)   -- PK 충돌 = 이미 처리됨 → ALREADY_PROCESSED
+     *   INSERT processed_charge(charge_id, uuid, nickname, amount)  -- PK 충돌 = 이미 처리됨 → ALREADY_PROCESSED
      *   UPSERT balance += amount
+     *   UPDATE processed_charge SET balance_before, balance_after   -- 같은 트랜잭션에서 확정된 전/후 잔액
      *   INSERT ledger(delta=+amount, reason=HOMEPAGE_CHARGE, ref=charge_id)
      * </pre>
-     * charge_id PK 충돌로 재지급이 원천 차단된다. 오류 시 롤백 후 {@link ChargeResult#FAILED}.
+     * charge_id PK 충돌로 재지급이 원천 차단된다. UPSERT 가 잔액 행을 X-잠금하므로
+     * {@code balance_before = balance_after - amount} 는 이 트랜잭션 기준으로 정확한 값이다.
+     * 오류 시 전체 롤백(감사 기록도 지급과 함께만 남는다 — 반쪽 기록 불가).
      */
-    public ChargeResult processCharge(String chargeId, UUID uuid, long amount) throws SQLException {
-        return withRetry(() -> processCharge0(chargeId, uuid, amount));
+    public ChargeOutcome processCharge(String chargeId, UUID uuid, String nickname, long amount) throws SQLException {
+        return withRetry(() -> processCharge0(chargeId, uuid, nickname, amount));
     }
 
-    private ChargeResult processCharge0(String chargeId, UUID uuid, long amount) throws SQLException {
+    private ChargeOutcome processCharge0(String chargeId, UUID uuid, String nickname, long amount) throws SQLException {
         if (amount <= 0) {
             // 비정상 금액은 지급하지 않지만, 무한 재처리를 막기 위해 이미처리로 간주(processed 만 기록).
-            return markInvalidCharge(chargeId, uuid, amount);
+            return markInvalidCharge(chargeId, uuid, nickname, amount);
         }
         Connection conn = null;
         try {
@@ -247,12 +253,13 @@ public final class CreditDao {
             try (PreparedStatement ps = conn.prepareStatement(SQL_PROCESSED_INSERT)) {
                 ps.setString(1, chargeId);
                 ps.setString(2, uuid.toString());
-                ps.setLong(3, amount);
+                setNullableString(ps, 3, nickname);
+                ps.setLong(4, amount);
                 ps.executeUpdate();
             } catch (SQLException dup) {
                 if (isDuplicateKey(dup)) {
                     conn.rollback(); // 이미 지급된 건 → 재지급하지 않음
-                    return ChargeResult.ALREADY_PROCESSED;
+                    return ChargeOutcome.alreadyProcessed();
                 }
                 throw dup;
             }
@@ -262,11 +269,18 @@ public final class CreditDao {
                 up.setLong(2, amount);
                 up.executeUpdate();
             }
-            long after = readBalance(conn, uuid);
+            long after = readBalance(conn, uuid); // UPSERT 로 행이 잠긴 상태 → 정확
+            long before = after - amount;
+            try (PreparedStatement ps = conn.prepareStatement(SQL_PROCESSED_AUDIT)) {
+                ps.setLong(1, before);
+                ps.setLong(2, after);
+                ps.setString(3, chargeId);
+                ps.executeUpdate();
+            }
             insertLedger(conn, uuid, amount, after, "HOMEPAGE_CHARGE", chargeId);
 
             conn.commit();
-            return ChargeResult.PAID;
+            return ChargeOutcome.paid(before, after);
         } catch (SQLException e) {
             rollbackQuietly(conn);
             throw e;
@@ -276,19 +290,20 @@ public final class CreditDao {
     }
 
     // 금액이 비정상인 결제 건: 지급 없이 processed 만 기록해 무한 재폴링을 끊는다(이미 기록돼 있으면 그대로 수렴).
-    private ChargeResult markInvalidCharge(String chargeId, UUID uuid, long amount) throws SQLException {
+    private ChargeOutcome markInvalidCharge(String chargeId, UUID uuid, String nickname, long amount) throws SQLException {
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(SQL_PROCESSED_INSERT)) {
             ps.setString(1, chargeId);
             ps.setString(2, uuid.toString());
-            ps.setLong(3, Math.max(0, amount));
+            setNullableString(ps, 3, nickname);
+            ps.setLong(4, Math.max(0, amount));
             ps.executeUpdate();
         } catch (SQLException dup) {
             if (!isDuplicateKey(dup)) {
                 throw dup;
             }
         }
-        return ChargeResult.ALREADY_PROCESSED;
+        return ChargeOutcome.alreadyProcessed();
     }
 
     // ── 닉네임 캐시 (PlayerPoints username_cache 패턴) ──────────────────────
@@ -387,6 +402,14 @@ public final class CreditDao {
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
             }
+        }
+    }
+
+    private static void setNullableString(PreparedStatement ps, int index, String value) throws SQLException {
+        if (value == null || value.isBlank()) {
+            ps.setNull(index, java.sql.Types.VARCHAR);
+        } else {
+            ps.setString(index, value);
         }
     }
 
