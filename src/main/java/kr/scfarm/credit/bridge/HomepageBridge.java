@@ -177,21 +177,19 @@ public final class HomepageBridge {
             amount = strictAmount(charge.get("amount"));
             credits = readCredits(charge, amount);
         } catch (Exception e) {
-            logger.error("[크레딧 자동충전 거부] charge=" + chargeId
-                    + " uuid/amount/credits 필드가 부적합합니다(" + e.getMessage() + "). "
-                    + "지급하지 않고 완료 보고도 하지 않습니다 — 수동 확인이 필요합니다.");
+            // 완료 보고를 하지 않으므로 같은 건이 매 폴링마다 다시 내려온다 → 건당 1회만 남긴다.
+            if (reportedRejects.add(chargeId)) {
+                logger.error("[크레딧 자동충전 거부] charge=" + chargeId
+                        + " uuid/amount/credits 필드가 부적합합니다(" + e.getMessage() + "). "
+                        + "지급하지 않고 완료 보고도 하지 않습니다 — 수동 확인이 필요합니다.");
+            }
             return;
         }
-        if (credits <= 0) {
-            // 결제는 됐는데 지급 수량이 0 이면 홈페이지 응답이 이상한 것 — 임의로 환산해 지급하지 않는다.
-            // 아래 processCharge 가 0 이하를 REJECTED 로 돌려주므로 완료 보고도 하지 않는다
-            // (미지급 건을 '처리완료'로 보고하면 유저가 결제하고 아무것도 못 받는 조용한 손실이 된다).
-            if (reportedRejects.contains(chargeId)) {
-                return; // 이미 알렸다 — 매 폴링마다 같은 에러를 반복하지 않는다
-            }
-            logger.error("결제 건 " + chargeId + " 지급 크레딧이 0 이하입니다(결제액=" + amount
-                    + "원, credits=" + (charge.has("credits") ? charge.get("credits") : "없음")
-                    + "). 지급/완료보고 모두 하지 않았습니다 — 홈페이지 응답을 확인하고 수동 정산하세요.");
+        // 지급 수량이 0 이하면 아래 processCharge 가 REJECTED 를 돌려준다 → 지급도, 완료 보고도 하지 않고
+        // 그 분기에서 건당 한 번만 ERROR 를 남긴다(미지급 건을 '처리완료'로 보고하면 유저가 결제하고
+        // 아무것도 못 받는 조용한 손실이 된다). 이미 알린 건이면 여기서 바로 끊어 로그 반복을 막는다.
+        if (credits <= 0 && reportedRejects.contains(chargeId)) {
+            return;
         }
         // 닉네임은 참고용(감사 기록·로그). 지급 키는 항상 uuid — 없거나 이상해도 지급엔 영향 없음.
         String nickname = null;

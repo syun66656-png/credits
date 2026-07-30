@@ -16,7 +16,7 @@ import java.util.function.Consumer;
  * 교차서버 Redis Pub/Sub(선택). 두 종류의 이벤트를 브로드캐스트한다:
  * <ul>
  *   <li><b>invalidate 채널</b> — 잔액 변경 시 다른 서버의 placeholder 캐시를 무효화(스테일 방지).</li>
- *   <li><b>notify 채널</b> — 홈페이지 자동충전 지급 이벤트({@code uuid,amount}). 각 백엔드가 받아
+ *   <li><b>notify 채널</b> — 홈페이지 자동충전 지급 이벤트({@code uuid,credits}). 각 백엔드가 받아
  *       "그 유저가 자기 서버에 접속 중이면" 인게임 알림을 보낸다. 브릿지 서버가 1대여도 유저가 어느
  *       백엔드에 있든 알림이 도달한다. 플러그인이 없는 서버(예: hub)는 구독자가 없어 자동 제외된다.</li>
  * </ul>
@@ -36,7 +36,7 @@ public final class RedisManager {
     private final String notifyChannel;
     private final ComponentLogger logger;
     private final Consumer<UUID> onInvalidate;
-    private final BiConsumer<UUID, Long> onNotify;
+    private final BiConsumer<UUID, Long> onNotify; // (uuid, 지급 크레딧 수량)
 
     private RedisClient client;
     private StatefulRedisConnection<String, String> pubConn;
@@ -94,8 +94,8 @@ public final class RedisManager {
                     return;
                 }
                 UUID uuid = UUID.fromString(message.substring(0, comma).trim());
-                long amount = Long.parseLong(message.substring(comma + 1).trim());
-                onNotify.accept(uuid, amount);
+                long credits = Long.parseLong(message.substring(comma + 1).trim());
+                onNotify.accept(uuid, credits);
             } catch (Exception ignored) {
                 // 잘못된 페이로드는 무시
             }
@@ -108,8 +108,8 @@ public final class RedisManager {
     }
 
     /** 자동충전 지급 알림 브로드캐스트(비동기). 각 백엔드가 받아 자기 서버 접속자에게 인게임 알림. */
-    public void publishChargeNotify(UUID uuid, long amount) {
-        publish(notifyChannel, uuid.toString() + "," + amount);
+    public void publishChargeNotify(UUID uuid, long credits) {
+        publish(notifyChannel, uuid.toString() + "," + credits);
     }
 
     private void publish(String channel, String payload) {

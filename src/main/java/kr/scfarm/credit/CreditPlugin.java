@@ -337,7 +337,7 @@ public final class CreditPlugin extends JavaPlugin {
         YamlConfiguration messagesConfig = new YamlConfiguration();
         messagesConfig.load(new File(getDataFolder(), "messages.yml"));
         applyMessageDefaults(messagesConfig);
-        String suffix = config.getString("display.suffix", "원");
+        String suffix = config.getString("display.suffix", "크레딧");
         boolean comma = config.getBoolean("display.thousands-separator", true);
         messages.reload(messagesConfig, suffix, comma);
     }
@@ -346,7 +346,7 @@ public final class CreditPlugin extends JavaPlugin {
         File file = new File(getDataFolder(), "messages.yml");
         FileConfiguration messagesConfig = YamlConfiguration.loadConfiguration(file);
         applyMessageDefaults(messagesConfig);
-        String suffix = config.getString("display.suffix", "원");
+        String suffix = config.getString("display.suffix", "크레딧");
         boolean comma = config.getBoolean("display.thousands-separator", true);
         // PlaceholderAPI(softdepend)가 설치돼 있으면 메세지에서 %...% 를 해석한다.
         boolean papi = getServer().getPluginManager().getPlugin("PlaceholderAPI") != null;
