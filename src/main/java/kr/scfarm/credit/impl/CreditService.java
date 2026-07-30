@@ -37,6 +37,8 @@ public final class CreditService implements CreditAPI {
     private final RedisManager redis; // nullable
     private final Predicate<UUID> cacheEligible;
     private final ConcurrentHashMap<UUID, Long> cache = new ConcurrentHashMap<>();
+    /** placeholder 적재 중복 방지(진행 중인 UUID). */
+    private final ConcurrentHashMap<UUID, Boolean> loading = new ConcurrentHashMap<>();
 
     public CreditService(CreditDao dao, ExecutorService executor, ComponentLogger logger,
                          RedisManager redis, Predicate<UUID> cacheEligible) {
@@ -51,11 +53,20 @@ public final class CreditService implements CreditAPI {
     public CompletableFuture<Long> getBalance(UUID uuid) {
         return async("getBalance", () -> {
             long bal = dao.getBalance(uuid);
-            if (cacheEligible.test(uuid)) {
-                cache.put(uuid, bal);
-            }
+            cachePut(uuid, bal);
             return bal;
         });
+    }
+
+    /** 온라인 유저만 캐시에 담고, 담은 직후 퇴장했으면 즉시 제거한다(캐시 영구 누수 방지). */
+    private void cachePut(UUID uuid, long balance) {
+        if (!cacheEligible.test(uuid)) {
+            return;
+        }
+        cache.put(uuid, balance);
+        if (!cacheEligible.test(uuid)) {
+            cache.remove(uuid);
+        }
     }
 
     @Override
@@ -105,11 +116,17 @@ public final class CreditService implements CreditAPI {
 
     // ── 캐시 수명주기 ───────────────────────────────────────────────────────
 
-    /** 캐시에 있으면 즉시 반환(PlaceholderAPI 동기 조회용), 없으면 비동기 적재를 예약하고 null 반환. */
+    /**
+     * 캐시에 있으면 즉시 반환(PlaceholderAPI 동기 조회용), 없으면 비동기 적재를 예약하고 null 반환.
+     *
+     * <p>플레이스홀더는 스코어보드/홀로그램 때문에 <b>매 틱, 시청자 수만큼</b> 호출될 수 있다.
+     * 적재 중복 요청을 막지 않으면 캐시가 비어 있는 동안 매 틱 DB 태스크가 쌓여(무제한 큐)
+     * DB 를 더 느리게 만들고 결국 힙이 터진다 → UUID 당 진행 중 적재를 1건으로 제한한다.
+     */
     public Long peekCache(UUID uuid) {
         Long v = cache.get(uuid);
-        if (v == null && cacheEligible.test(uuid)) {
-            getBalance(uuid); // 백그라운드 적재(결과는 캐시에 채워짐)
+        if (v == null && cacheEligible.test(uuid) && loading.putIfAbsent(uuid, Boolean.TRUE) == null) {
+            getBalance(uuid).whenComplete((bal, ex) -> loading.remove(uuid));
         }
         return v;
     }
@@ -143,30 +160,45 @@ public final class CreditService implements CreditAPI {
         return async("refreshBalances", () -> {
             Map<UUID, Long> balances = dao.getBalances(uuids);
             for (Map.Entry<UUID, Long> e : balances.entrySet()) {
-                if (cacheEligible.test(e.getKey())) {
-                    cache.put(e.getKey(), e.getValue());
-                }
+                cachePut(e.getKey(), e.getValue());
             }
+            // 퇴장했는데 경합으로 남아 있는 항목을 주기적으로 정리(캐시 무한 증가 방지)
+            cache.keySet().removeIf(u -> !cacheEligible.test(u));
             return null;
         });
     }
 
-    /** 잔액 변경 후 처리: 로컬 캐시 무효화 → 교차서버 브로드캐스트 → (온라인이면) 재적재. */
+    /**
+     * 잔액 변경 후 처리: 로컬 캐시 무효화 → 교차서버 브로드캐스트 → (온라인이면) 재적재.
+     *
+     * <p><b>이미 커밋된 뒤에 실행되므로 절대 예외를 밖으로 던지지 않는다.</b> 여기서 던지면
+     * (예: 종료 중 executor 거부) 커밋에 성공한 give/take 가 호출자에게 실패로 보고되고,
+     * 관리자/상점이 재시도해 <b>이중 지급·이중 결제</b>가 발생한다.
+     */
     private void onChanged(UUID uuid) {
-        cache.remove(uuid);
-        if (redis != null) {
-            redis.publishInvalidate(uuid);
-        }
-        if (!cacheEligible.test(uuid)) {
-            return; // 오프라인 유저는 캐시에 다시 담지 않는다(무한 증가 방지)
-        }
-        executor.execute(() -> {
-            try {
-                cache.put(uuid, dao.getBalance(uuid));
-            } catch (Exception ignored) {
-                // 캐시 재적재 실패는 무시(다음 조회에서 DB 로 폴백)
+        try {
+            cache.remove(uuid);
+            if (redis != null) {
+                redis.publishInvalidate(uuid);
             }
-        });
+            if (!cacheEligible.test(uuid)) {
+                return; // 오프라인 유저는 캐시에 다시 담지 않는다(무한 증가 방지)
+            }
+            executor.execute(() -> {
+                try {
+                    long bal = dao.getBalance(uuid);
+                    cache.put(uuid, bal);
+                    // put 직후 퇴장했다면 남은 항목을 정리(캐시 영구 누수 방지)
+                    if (!cacheEligible.test(uuid)) {
+                        cache.remove(uuid);
+                    }
+                } catch (Throwable ignored) {
+                    // 캐시 재적재 실패는 무시(다음 조회에서 DB 로 폴백)
+                }
+            });
+        } catch (Throwable ignored) {
+            // 커밋된 결과를 뒤집지 않는다 — 캐시/브로드캐스트 실패는 무시
+        }
     }
 
     private interface SqlCallable<T> {
@@ -175,14 +207,20 @@ public final class CreditService implements CreditAPI {
 
     private <T> CompletableFuture<T> async(String op, SqlCallable<T> body) {
         CompletableFuture<T> future = new CompletableFuture<>();
-        executor.execute(() -> {
-            try {
-                future.complete(body.call());
-            } catch (Throwable t) {
-                logger.warn("크레딧 " + op + " 처리 중 오류", t);
-                future.completeExceptionally(t);
-            }
-        });
+        try {
+            executor.execute(() -> {
+                try {
+                    future.complete(body.call());
+                } catch (Throwable t) {
+                    logger.warn("크레딧 " + op + " 처리 중 오류", t);
+                    future.completeExceptionally(t);
+                }
+            });
+        } catch (Throwable t) {
+            // 종료 중 RejectedExecutionException 등 — 호출 스레드로 던지지 않고 future 로 전달한다
+            // (호출자가 예외를 동기적으로 맞고 이중 처리하는 것을 방지)
+            future.completeExceptionally(t);
+        }
         return future;
     }
 }

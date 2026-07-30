@@ -1,6 +1,7 @@
 package kr.scfarm.credit.bridge;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import kr.scfarm.credit.db.ChargeOutcome;
@@ -12,7 +13,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 
 /**
@@ -30,6 +34,8 @@ import java.util.function.BiConsumer;
 public final class HomepageBridge {
 
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(15);
+    /** 응답 본문 상한(바이트). 장애 페이지/악의적 엔드포인트로 인한 힙 고갈 방지(최대 200건이면 충분). */
+    private static final int MAX_RESPONSE_BYTES = 4_000_000;
 
     /**
      * 크레딧 환산 비율 — 1,000원 = 1크레딧.
@@ -51,6 +57,11 @@ public final class HomepageBridge {
     private final BiConsumer<UUID, Long> onPaid;
     /** 지급 로그 yml 파일(플러그인 폴더). null 이면 파일 로그 미기록. */
     private final ChargeLogFile chargeLog;
+    /**
+     * 이미 ERROR 를 남긴 거부 건. 거부된 결제는 완료 보고를 하지 않으므로 매 폴링마다 다시 내려온다 —
+     * 로그가 무한히 쌓이지 않도록 건당 한 번만 남긴다(수동 정산 후 사라짐).
+     */
+    private final Set<String> reportedRejects = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     public HomepageBridge(String baseUrl, String pluginKey, CreditDao dao,
                           ComponentLogger logger, BiConsumer<UUID, Long> onPaid, ChargeLogFile chargeLog) {
@@ -62,10 +73,27 @@ public final class HomepageBridge {
         this.logger = logger;
         this.onPaid = onPaid;
         this.chargeLog = chargeLog;
+        // 리다이렉트를 절대 따라가지 않는다(보안상 필수):
+        //  1) JDK HttpClient 는 교차 호스트 리다이렉트에서도 커스텀 헤더(x-plugin-key)를 그대로 재전송한다
+        //     → 도메인 탈취/오픈 리다이렉트 하나로 비밀키가 외부에 유출되고, 공격자가 pending 응답을
+        //       조작해 임의 크레딧을 발행할 수 있다.
+        //  2) 301/302 는 POST 를 본문 없는 GET 으로 바꿔버린다 → 완료 보고가 조용히 실패하고
+        //     같은 건이 영원히 재처리 대기로 남는다(www/https 정규화 같은 흔한 설정 변경으로 발생).
+        // 3xx 는 설정 오류로 간주해 크게 로그를 남긴다.
         this.http = HttpClient.newBuilder()
                 .connectTimeout(HTTP_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
+    }
+
+    /** 3xx 응답을 설정 오류로 처리(리다이렉트를 따라가면 키 유출/보고 유실 위험). */
+    private boolean isRedirect(int code, String what) {
+        if (code >= 300 && code < 400) {
+            logger.error("홈페이지 브릿지 " + what + ": 리다이렉트(HTTP " + code + ") 응답을 받았습니다. "
+                    + "base-url 을 최종 주소로 정확히 설정하세요(리다이렉트는 보안상 따라가지 않습니다).");
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -80,19 +108,34 @@ public final class HomepageBridge {
                     .header("x-plugin-key", pluginKey)
                     .GET()
                     .build();
-            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() == 401) {
-                logger.error("홈페이지 브릿지 인증 실패(401): plugin-key 를 확인하세요.");
-                return;
+            // 스트림으로 받아 상한까지만 읽는다. ofString 은 본문을 통째로 먼저 메모리에 올리므로
+            // 상한 검사가 사후약방문이 된다(거대 응답 = 서버 힙 고갈).
+            HttpResponse<java.io.InputStream> res = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            try (java.io.InputStream in = res.body()) {
+                if (res.statusCode() == 401) {
+                    logger.error("홈페이지 브릿지 인증 실패(401): plugin-key 를 확인하세요.");
+                    return;
+                }
+                if (isRedirect(res.statusCode(), "대기결제 조회")) {
+                    return;
+                }
+                if (res.statusCode() != 200) {
+                    logger.warn("홈페이지 대기결제 조회 실패(HTTP " + res.statusCode() + "). 다음 폴링에 재시도합니다.");
+                    return;
+                }
+                byte[] bytes = in.readNBytes(MAX_RESPONSE_BYTES + 1);
+                if (bytes.length > MAX_RESPONSE_BYTES) {
+                    logger.error("홈페이지 대기결제 응답이 비정상적으로 큽니다(" + MAX_RESPONSE_BYTES
+                            + "바이트 초과). 처리를 건너뜁니다.");
+                    return;
+                }
+                body = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
             }
-            if (res.statusCode() != 200) {
-                logger.warn("홈페이지 대기결제 조회 실패(HTTP " + res.statusCode() + "). 다음 폴링에 재시도합니다.");
-                return;
-            }
-            body = res.body();
         } catch (Exception e) {
-            // 네트워크 오류/타임아웃 → 다음 폴링에 재시도(크래시 금지)
-            logger.warn("홈페이지 대기결제 조회 중 네트워크 오류: " + e.getMessage());
+            // 네트워크 오류/타임아웃 → 다음 폴링에 재시도(크래시 금지).
+            // 주의: 예외 메세지에 요청 헤더가 섞여 나올 수 있으므로 예외 타입만 남기고 메세지는 찍지 않는다
+            // (plugin-key 가 로그 파일에 노출되는 것을 원천 차단).
+            logger.warn("홈페이지 대기결제 조회 중 네트워크 오류: " + e.getClass().getSimpleName());
             return;
         }
 
@@ -129,19 +172,26 @@ public final class HomepageBridge {
         long credits; // 실제 지급할 크레딧 수량
         try {
             uuid = parseUuid(charge.get("uuid").getAsString());
-            amount = charge.get("amount").getAsLong();
+            // amount/credits 는 반드시 정수 JSON 숫자여야 한다. 문자열/실수/거대수를 그냥 getAsLong 하면
+            // 조용히 절삭되거나 2^64 로 감싸져 엉뚱한 수량이 지급될 수 있다.
+            amount = strictAmount(charge.get("amount"));
             credits = readCredits(charge, amount);
         } catch (Exception e) {
-            logger.warn("결제 건 " + chargeId + " 필드 오류(uuid/amount). 건너뜁니다.");
+            logger.error("[크레딧 자동충전 거부] charge=" + chargeId
+                    + " uuid/amount/credits 필드가 부적합합니다(" + e.getMessage() + "). "
+                    + "지급하지 않고 완료 보고도 하지 않습니다 — 수동 확인이 필요합니다.");
             return;
         }
         if (credits <= 0) {
             // 결제는 됐는데 지급 수량이 0 이면 홈페이지 응답이 이상한 것 — 임의로 환산해 지급하지 않는다.
-            // 아래 processCharge 가 0 이하를 "무효 건"으로 기록해 무한 재처리를 막으므로,
-            // 놓치지 않도록 여기서 에러 로그만 남기고 그 경로를 그대로 태운다.
+            // 아래 processCharge 가 0 이하를 REJECTED 로 돌려주므로 완료 보고도 하지 않는다
+            // (미지급 건을 '처리완료'로 보고하면 유저가 결제하고 아무것도 못 받는 조용한 손실이 된다).
+            if (reportedRejects.contains(chargeId)) {
+                return; // 이미 알렸다 — 매 폴링마다 같은 에러를 반복하지 않는다
+            }
             logger.error("결제 건 " + chargeId + " 지급 크레딧이 0 이하입니다(결제액=" + amount
                     + "원, credits=" + (charge.has("credits") ? charge.get("credits") : "없음")
-                    + "). 지급 없이 무효 처리합니다 — 홈페이지 응답을 확인하세요.");
+                    + "). 지급/완료보고 모두 하지 않았습니다 — 홈페이지 응답을 확인하고 수동 정산하세요.");
         }
         // 닉네임은 참고용(감사 기록·로그). 지급 키는 항상 uuid — 없거나 이상해도 지급엔 영향 없음.
         String nickname = null;
@@ -151,6 +201,9 @@ public final class HomepageBridge {
             }
         } catch (Exception ignored) {
             // 닉네임 파싱 실패는 무시
+        }
+        if (nickname != null && nickname.length() > 30) {
+            nickname = nickname.substring(0, 30); // DB 컬럼과 로그 파일 기록을 동일하게 맞춘다
         }
 
         ChargeOutcome outcome;
@@ -186,33 +239,72 @@ public final class HomepageBridge {
                 }
             }
             case ALREADY_PROCESSED -> { /* 이미 지급됨 — 조용히 보고만 재시도 */ }
+            case REJECTED -> {
+                // 지급하지 않았으므로 절대 완료 보고하지 않는다(보고하면 홈페이지가 지급됨으로 확정 →
+                // 결제한 유저가 아무것도 못 받고 추적도 불가능). 홈페이지에 미지급으로 남겨 수동 정산.
+                if (reportedRejects.add(chargeId)) {
+                    logger.error("[크레딧 자동충전 거부] charge=" + chargeId
+                            + " uuid=" + uuid + " 결제액=" + amount + "원 지급크레딧=" + credits
+                            + " — 지급 수량이 범위(1~" + CreditDao.MAX_AMOUNT + ")를 벗어났거나"
+                            + " charge_id 길이가 부적합합니다. 지급/완료보고 모두 하지 않았습니다."
+                            + " 수동 확인이 필요합니다.");
+                }
+                return;
+            }
             case FAILED -> {
                 return; // 보고하지 않음
             }
+            default -> {
+                return; // 알 수 없는 상태는 절대 완료 보고하지 않는다(미지급 건을 완료 처리하는 사고 방지)
+            }
         }
-        // 지급/스킵 여부와 무관하게 항상 보고(멱등). 실패해도 다음 폴링에 재보고.
+        // 지급됐거나 이미 지급된 건만 보고(멱등). 실패해도 다음 폴링에 재보고.
         reportComplete(chargeId);
     }
 
     private void reportComplete(String chargeId) {
         try {
-            String json = "{\"id\":\"" + escapeJson(chargeId) + "\"}";
+            // 수기 문자열 조립 대신 Gson 으로 직렬화(제어문자/따옴표가 섞여도 항상 유효한 JSON)
+            JsonObject payload = new JsonObject();
+            payload.addProperty("id", chargeId);
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(completeUrl))
                     .timeout(HTTP_TIMEOUT)
                     .header("x-plugin-key", pluginKey)
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
                     .build();
             HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
             int code = res.statusCode();
             if (code == 401) {
                 logger.error("홈페이지 브릿지 인증 실패(401, complete): plugin-key 를 확인하세요.");
+            } else if (isRedirect(code, "완료 보고")) {
+                // isRedirect 가 이미 ERROR 로 남김 — 리다이렉트를 따라가면 POST 가 GET 으로 바뀌어
+                // 보고가 조용히 유실된다(같은 건이 영원히 대기로 남음).
+                logger.error("결제 완료 보고가 리다이렉트로 실패했습니다: charge=" + chargeId);
             } else if (code < 200 || code >= 300) {
                 logger.warn("결제 완료 보고 실패(HTTP " + code + "): charge=" + chargeId + ". 다음 폴링에 재보고합니다.");
             }
         } catch (Exception e) {
-            logger.warn("결제 완료 보고 중 네트워크 오류: charge=" + chargeId + " (" + e.getMessage() + ")");
+            // 예외 메세지에 요청 헤더가 섞일 수 있어 타입만 남긴다(plugin-key 노출 방지)
+            logger.warn("결제 완료 보고 중 네트워크 오류: charge=" + chargeId
+                    + " (" + e.getClass().getSimpleName() + ")");
+        }
+    }
+
+    /**
+     * amount 를 엄격히 해석한다. 정수 JSON 숫자만 허용 — 문자열/실수/거대수는 거부한다.
+     * (Gson 의 getAsLong 은 "5000.9" 를 5000 으로 절삭하고 1e30 을 2^64 모듈로로 감싸버린다)
+     */
+    private static long strictAmount(JsonElement el) {
+        if (el == null || !el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("amount 가 숫자가 아님");
+        }
+        java.math.BigDecimal bd = new java.math.BigDecimal(el.getAsJsonPrimitive().getAsString());
+        try {
+            return bd.longValueExact(); // 소수/범위 초과면 ArithmeticException
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("amount 가 정수 범위를 벗어남: " + bd.toPlainString());
         }
     }
 
@@ -225,7 +317,8 @@ public final class HomepageBridge {
      */
     private static long readCredits(JsonObject charge, long amount) {
         if (charge.has("credits") && !charge.get("credits").isJsonNull()) {
-            return charge.get("credits").getAsLong();
+            // amount 와 동일하게 엄격 파싱 — 실수/문자열/거대수를 조용히 절삭해 지급하면 안 된다.
+            return strictAmount(charge.get("credits"));
         }
         return amount / WON_PER_CREDIT;
     }
@@ -238,9 +331,5 @@ public final class HomepageBridge {
                     "$1-$2-$3-$4-$5");
         }
         return UUID.fromString(s);
-    }
-
-    private static String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

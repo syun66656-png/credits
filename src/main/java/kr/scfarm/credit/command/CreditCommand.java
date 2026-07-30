@@ -53,16 +53,32 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
     /** 메세지 빌드(PAPI 해석 포함) + 전송을 메인 스레드에서 수행. 비동기 콜백에서도 안전. 빈 메세지("")면 전송 생략. */
     private void reply(CommandSender sender, Supplier<Component> builder) {
         Runnable send = () -> {
-            Component c = builder.get();
-            if (c != null) { // 값이 "" 인 메세지는 null → 전송하지 않음
-                sender.sendMessage(c);
+            try {
+                Component c = builder.get();
+                if (c != null) { // 값이 "" 인 메세지는 null → 전송하지 않음
+                    sender.sendMessage(c);
+                }
+            } catch (Throwable t) {
+                // 잘못된 MiniMessage/PAPI 출력으로 파싱이 실패해도 명령어 처리가 죽지 않게 한다
+                plugin.getComponentLogger().warn("메세지 렌더 실패: " + t.getMessage());
             }
         };
         if (Bukkit.isPrimaryThread()) {
             send.run();
         } else {
+            if (!plugin.isEnabled()) {
+                return; // 비활성화된 플러그인의 스케줄러 사용 금지
+            }
             plugin.getServer().getGlobalRegionScheduler().execute(plugin, send);
         }
+    }
+
+    /**
+     * 닉네임 사전 검증(URL 오해석·오지급 방지). 자바 계정(영숫자/밑줄 16자)에
+     * Floodgate 베드락 접두사('.')까지 허용한다.
+     */
+    private static boolean validName(String s) {
+        return s != null && s.matches("[A-Za-z0-9_.]{1,17}");
     }
 
     /** 메세지를 읽는 대상(=sender)이 플레이어면 그 플레이어를 PAPI 컨텍스트로 쓴다(뷰어 기준 %...% 해석). */
@@ -134,6 +150,10 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             return;
         }
         String nick = args[1];
+        if (!validName(nick)) {
+            reply(sender, () -> msg.get("player-not-found", papiOf(sender)));
+            return;
+        }
         resolveUuid(nick).whenComplete((opt, ex) -> {
             if (ex != null || opt == null || opt.isEmpty()) {
                 reply(sender, () -> msg.get("player-not-found", papiOf(sender)));
@@ -157,6 +177,10 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             return;
         }
         String nick = args[1];
+        if (!validName(nick)) {
+            reply(sender, () -> msg.get("player-not-found", papiOf(sender)));
+            return;
+        }
         long amount;
         try {
             amount = Long.parseLong(args[2]);
@@ -164,7 +188,8 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
             reply(sender, () -> msg.get("invalid-amount", papiOf(sender)));
             return;
         }
-        if (amount <= 0) {
+        // 상한을 둔다 — 0 하나 더 찍는 오타로 천문학적 금액이 지급되고 계정이 오버플로로 망가지는 것을 막는다.
+        if (amount <= 0 || amount > kr.scfarm.credit.db.CreditDao.MAX_AMOUNT) {
             reply(sender, () -> msg.get("invalid-amount", papiOf(sender)));
             return;
         }
@@ -182,7 +207,10 @@ public final class CreditCommand implements CommandExecutor, TabCompleter {
                 if (dbEx != null) {
                     reply(sender, () -> msg.get("db-error", papiOf(sender)));
                 } else if (Boolean.TRUE.equals(ok)) {
-                    reply(sender, () -> msg.playerAmount(give ? "give-success" : "take-success", papiOf(sender), nick, amount));
+                    // 실제로 반영된 UUID 를 함께 보여준다 — 닉변/스테일 캐시로 엉뚱한 계정에 들어갔을 때
+                    // 관리자가 즉시 알아챌 수 있는 유일한 단서다.
+                    reply(sender, () -> msg.playerAmountUuid(
+                            give ? "give-success" : "take-success", papiOf(sender), nick, amount, uuid));
                 } else if (!give) {
                     reply(sender, () -> msg.get("take-insufficient", papiOf(sender)));
                 } else {

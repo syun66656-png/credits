@@ -32,15 +32,16 @@
 
     <dependencies>
         <!--
-          Paper API 26.2.
+          Paper API. 실제 배포 서버(26.1.2)와 같은 마이너 라인에 맞춘다 —
+          상위 라인으로 컴파일하면 서버에 없는 메서드를 호출해 런타임 NoSuchMethodError 가 날 수 있다.
           명세(1번): Paper는 26.1부터 서버 JAR 난독화를 폐기 → Mojang 매핑 그대로 사용.
           따라서 paperweight / reobf / remap 을 절대 쓰지 않는다. paper-api provided 하나로 충분.
-          버전 범위 [26.2,26.3) = 26.2 라인의 최신 빌드를 자동 해석(다음 마이너로 넘어가지 않음).
+          버전 범위 [26.1.2,26.2) = 26.1 라인의 최신 빌드를 자동 해석(상위 마이너로 넘어가지 않음).
         -->
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
-            <version>[26.2,26.3)</version>
+            <version>[26.1.2,26.2)</version>
             <scope>provided</scope>
         </dependency>
 

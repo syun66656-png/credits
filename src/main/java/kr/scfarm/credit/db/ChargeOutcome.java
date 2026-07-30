@@ -15,4 +15,9 @@ public record ChargeOutcome(ChargeResult status, long balanceBefore, long balanc
     public static ChargeOutcome alreadyProcessed() {
         return new ChargeOutcome(ChargeResult.ALREADY_PROCESSED, -1, -1);
     }
+
+    /** 데이터가 부적합해 지급 불가 — 완료 보고하지 않고 ERROR 로 남긴다(수동 정산 대상). */
+    public static ChargeOutcome rejected() {
+        return new ChargeOutcome(ChargeResult.REJECTED, -1, -1);
+    }
 }

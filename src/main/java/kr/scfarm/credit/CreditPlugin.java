@@ -43,6 +43,7 @@ public final class CreditPlugin extends JavaPlugin {
     private RedisManager redis;
     private CreditService creditService;
     private Messages messages;
+    private CreditPlaceholderExpansion placeholderExpansion;
 
     @Override
     public void onEnable() {
@@ -107,8 +108,8 @@ public final class CreditPlugin extends JavaPlugin {
             } catch (Throwable t) {
                 // lettuce 미탑재(NoClassDefFoundError) 등 → 캐시 없이 진행
                 console.logConn("Redis", false);
-                getComponentLogger().warn("Redis 를 사용할 수 없어 캐시 없이 DB 조회로 진행합니다. "
-                        + "(plugin.yml 의 libraries 에 lettuce-core 추가 필요)");
+                getComponentLogger().warn("Redis 를 사용할 수 없어 캐시 없이 DB 조회로 진행합니다("
+                        + t.getClass().getSimpleName() + "). 지급/기록에는 영향이 없습니다.");
                 this.redis = null;
             }
         }
@@ -159,19 +160,35 @@ public final class CreditPlugin extends JavaPlugin {
         // 서비스 해제
         getServer().getServicesManager().unregisterAll(this);
 
+        // PlaceholderAPI 확장 해제. persist()=true 라 직접 해제하지 않으면 PAPI 가 죽은 서비스/
+        // 클래스로더를 계속 붙들고, 재로드 후 %credit_balance% 가 종료된 스레드풀을 건드린다.
+        if (placeholderExpansion != null) {
+            try {
+                placeholderExpansion.unregister();
+            } catch (Throwable ignored) {
+                // PAPI 가 이미 내렸을 수 있음
+            }
+            placeholderExpansion = null;
+        }
+
+        // Redis 를 먼저 닫는다 — 구독 스레드가 비활성화된 플러그인의 스케줄러를 건드리면 예외가 난다.
+        if (redis != null) {
+            redis.close();
+        }
+
         if (executor != null) {
             executor.shutdown();
             try {
                 if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
                     executor.shutdownNow();
+                    // 강제 종료 후에도 진행 중인 트랜잭션이 끝날 시간을 준다
+                    // (커넥션 풀을 먼저 닫아 커밋이 중단되는 것을 방지)
+                    executor.awaitTermination(5, TimeUnit.SECONDS);
                 }
             } catch (InterruptedException e) {
                 executor.shutdownNow();
                 Thread.currentThread().interrupt();
             }
-        }
-        if (redis != null) {
-            redis.close();
         }
         if (database != null) {
             database.close();
@@ -189,7 +206,9 @@ public final class CreditPlugin extends JavaPlugin {
         // 그래야 (1) 홈페이지 API 를 서버 수만큼 중복 폴링하지 않고,
         //        (2) [크레딧 자동충전] 감사 로그가 항상 그 한 서버의 로그 파일에만 남아 추적이 쉽다.
         // (지급 자체는 charge_id PK 멱등이라 여러 서버가 켜져도 중복 지급은 없지만, 로그가 흩어진다.)
-        if (!hp.getBoolean("bridge-enabled", true)) {
+        // 기본값 false: 켜야만 도는 opt-in. 기본 true 로 두면 신규 설치 시 전 백엔드가 동시에 폴링해
+        // 감사 로그가 흩어지고 API 부하가 서버 수만큼 늘어난다(문서의 "한 서버만" 지침과도 충돌).
+        if (!hp.getBoolean("bridge-enabled", false)) {
             getComponentLogger().info("홈페이지 브릿지: bridge-enabled=false → 이 서버에서는 폴링하지 않습니다(크레딧 기능은 정상).");
             return;
         }
@@ -203,6 +222,29 @@ public final class CreditPlugin extends JavaPlugin {
         if (baseUrl == null || baseUrl.isBlank() || key == null || key.isBlank()
                 || key.equals("여기에_PLUGIN_API_KEY")) {
             getComponentLogger().warn("홈페이지 브릿지: base-url/plugin-key 미설정 → 폴링을 시작하지 않습니다.");
+            return;
+        }
+        baseUrl = baseUrl.trim();
+        key = key.trim();
+        // HTTP 헤더에 넣을 수 없는 문자가 키에 섞이면 요청 생성 자체가 예외를 던지고, 그 예외 메세지에는
+        // 키 전체가 담긴다 → 로그 파일에 비밀키가 그대로 남는다. 시작 시 검증해 원천 차단한다.
+        if (!key.matches("[\\x21-\\x7E]+")) {
+            getComponentLogger().error("홈페이지 브릿지: plugin-key 에 공백/한글/보이지 않는 문자가 섞여 있습니다. "
+                    + "복사 과정에서 들어간 문자를 제거하세요. (보안상 키 값은 로그에 남기지 않습니다) → 폴링 중단");
+            return;
+        }
+        if (!baseUrl.startsWith("https://")) {
+            // http 면 첫 요청부터 비밀키가 평문으로 전송된다.
+            getComponentLogger().error("홈페이지 브릿지: base-url 은 반드시 https:// 여야 합니다(현재 설정은 평문 전송 위험). → 폴링 중단");
+            return;
+        }
+        try {
+            java.net.URI u = java.net.URI.create(baseUrl);
+            if (u.getHost() == null) {
+                throw new IllegalArgumentException("host 없음");
+            }
+        } catch (Exception e) {
+            getComponentLogger().error("홈페이지 브릿지: base-url 형식이 올바르지 않습니다 → 폴링 중단");
             return;
         }
 
@@ -236,8 +278,7 @@ public final class CreditPlugin extends JavaPlugin {
             getComponentLogger().info("지급 알림: Redis 브로드캐스트 활성 → 유저가 접속한 어느 백엔드든 알림 전달.");
         } else {
             getComponentLogger().warn("지급 알림: Redis 미사용 → 이 브릿지 서버 접속자에게만 알림. "
-                    + "다른 백엔드에서도 알림을 받으려면 모든 서버에 redis.enabled: true + plugin.yml 의 "
-                    + "lettuce-core 라이브러리를 활성화하세요.");
+                    + "다른 백엔드에서도 알림을 받으려면 모든 서버에서 redis.enabled: true 로 설정하세요.");
         }
     }
 
@@ -249,6 +290,9 @@ public final class CreditPlugin extends JavaPlugin {
      * @param credits 지급된 크레딧 수량 (결제 금액이 아니다 — 1,000원 = 1크레딧)
      */
     private void deliverChargeNotification(UUID uuid, long credits) {
+        if (!isEnabled()) {
+            return; // 비활성화 상태에서 스케줄러를 쓰면 IllegalPluginAccessException
+        }
         getServer().getGlobalRegionScheduler().execute(this, () -> {
             org.bukkit.entity.Player p = getServer().getPlayer(uuid);
             if (p != null && messages != null) {
@@ -267,7 +311,9 @@ public final class CreditPlugin extends JavaPlugin {
             return;
         }
         try {
-            new CreditPlaceholderExpansion(creditService, messages).register();
+            CreditPlaceholderExpansion exp = new CreditPlaceholderExpansion(creditService, messages);
+            exp.register();
+            this.placeholderExpansion = exp; // onDisable 에서 해제하기 위해 보관
             getComponentLogger().info("PlaceholderAPI 확장 등록: %credit_balance% / %credit_balance_formatted%");
         } catch (Throwable t) {
             getComponentLogger().warn("PlaceholderAPI 확장 등록 실패(무시): " + t.getMessage());
@@ -280,11 +326,17 @@ public final class CreditPlugin extends JavaPlugin {
      * (커넥션 풀·구독을 런타임에 갈아끼우다 유실이 나는 것보다, 재시작이 무손실 원칙에 맞다).
      * 메인 스레드에서 호출된다(명령어 핸들러).
      */
-    public void reloadMessages() {
+    public void reloadMessages() throws Exception {
         reloadConfig();
         FileConfiguration config = getConfig();
-        File file = new File(getDataFolder(), "messages.yml");
-        FileConfiguration messagesConfig = YamlConfiguration.loadConfiguration(file);
+        // 파일이 삭제됐으면 기본 파일을 복구한 뒤 읽는다.
+        saveDefaultResource("messages.yml");
+        // 엄격 파싱: YamlConfiguration.loadConfiguration 은 문법 오류 시 조용히 "빈 설정"을 돌려주기 때문에
+        // 오타 하나로 모든 문구가 <missing message:...> 가 되고, 심지어 성공 메세지까지 깨진다.
+        // load(File) 은 예외를 던지므로 호출측이 reload-failed 를 띄우고 기존 문구를 그대로 유지할 수 있다.
+        YamlConfiguration messagesConfig = new YamlConfiguration();
+        messagesConfig.load(new File(getDataFolder(), "messages.yml"));
+        applyMessageDefaults(messagesConfig);
         String suffix = config.getString("display.suffix", "원");
         boolean comma = config.getBoolean("display.thousands-separator", true);
         messages.reload(messagesConfig, suffix, comma);
@@ -293,6 +345,7 @@ public final class CreditPlugin extends JavaPlugin {
     private Messages loadMessages(FileConfiguration config) {
         File file = new File(getDataFolder(), "messages.yml");
         FileConfiguration messagesConfig = YamlConfiguration.loadConfiguration(file);
+        applyMessageDefaults(messagesConfig);
         String suffix = config.getString("display.suffix", "원");
         boolean comma = config.getBoolean("display.thousands-separator", true);
         // PlaceholderAPI(softdepend)가 설치돼 있으면 메세지에서 %...% 를 해석한다.
@@ -300,6 +353,28 @@ public final class CreditPlugin extends JavaPlugin {
         // Nexo(softdepend)가 설치돼 있으면 메세지를 Nexo MiniMessage 로 파싱해 <glyph>/<shift> 등을 지원한다.
         boolean nexo = getServer().getPluginManager().getPlugin("Nexo") != null;
         return new Messages(messagesConfig, suffix, comma, papi, nexo);
+    }
+
+    /**
+     * jar 안의 messages.yml 을 기본값으로 얹는다.
+     *
+     * <p>이게 없으면 <b>업데이트한 서버에서 새로 추가된 키가 통째로 비어</b> 플레이어에게
+     * {@code <missing message: charge-received>} 같은 디버그 문자열이 그대로 노출된다
+     * (기존 파일은 덮어쓰지 않으므로 새 키가 영원히 없다). copyDefaults 를 켜야
+     * {@code getKeys(false)} 가 기본값 키까지 포함한다.
+     */
+    private void applyMessageDefaults(FileConfiguration messagesConfig) {
+        try (java.io.InputStream in = getResource("messages.yml")) {
+            if (in == null) {
+                return;
+            }
+            YamlConfiguration defaults = YamlConfiguration.loadConfiguration(
+                    new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+            messagesConfig.setDefaults(defaults);
+            messagesConfig.options().copyDefaults(true);
+        } catch (Exception e) {
+            getComponentLogger().warn("messages.yml 기본값 적용 실패(누락 키가 있을 수 있습니다): " + e.getMessage());
+        }
     }
 
     private void saveDefaultResource(String name) {

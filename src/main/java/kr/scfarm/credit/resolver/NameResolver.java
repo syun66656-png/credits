@@ -136,8 +136,14 @@ public final class NameResolver {
                     return Optional.of(name);
                 }
             }
-            // 204/404 등 = 프로필 없음. 네거티브 캐싱으로 레이트리밋 방지(NameFetcher 의 "Unknown" 캐싱 패턴).
-            nameCache.put(uuid, new Cached<>(null));
+            // 프로필 없음(404/204/200-무필드)만 네거티브 캐싱한다. 429/5xx 를 캐싱하면 실존 유저가
+            // 5분간 "없음"으로 굳어 인증/지급이 막힌다.
+            int code = res.statusCode();
+            if (code == 404 || code == 204 || code == 200) {
+                nameCache.put(uuid, new Cached<>(null));
+            } else {
+                logger.warn("Mojang 이름 조회 일시 실패(HTTP " + code + "): " + uuid);
+            }
             return Optional.empty();
         } catch (Exception e) {
             logger.warn("Mojang 이름 조회 실패: " + uuid, e);
@@ -146,8 +152,12 @@ public final class NameResolver {
     }
 
     private Optional<UUID> fetchUuidFromMojang(String name, String key) {
+        // 반드시 인코딩한다. 예: "Notch#1" 을 그대로 붙이면 '#' 이 fragment 로 잘려 실제로는 "Notch" 를
+        // 조회하고 → 전혀 다른 계정의 UUID 를 돌려준다(오지급 위험).
+        String encoded = java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8)
+                .replace("+", "%20");
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("https://api.mojang.com/users/profiles/minecraft/" + name))
+                .uri(URI.create("https://api.mojang.com/users/profiles/minecraft/" + encoded))
                 .timeout(HTTP_TIMEOUT)
                 .GET()
                 .build();
@@ -164,7 +174,14 @@ public final class NameResolver {
                     return Optional.of(uuid);
                 }
             }
-            uuidCache.put(key, new Cached<>(null)); // 네거티브 캐싱
+            // 404/204(= 없는 이름)만 네거티브 캐싱한다. 429(레이트리밋)/5xx 를 캐싱하면
+            // 실존 플레이어가 5분 동안 "없음"으로 굳어 지급이 막힌다.
+            int code = res.statusCode();
+            if (code == 404 || code == 204 || code == 200) {
+                uuidCache.put(key, new Cached<>(null));
+            } else {
+                logger.warn("Mojang UUID 조회 일시 실패(HTTP " + code + "): " + name);
+            }
             return Optional.empty();
         } catch (Exception e) {
             logger.warn("Mojang UUID 조회 실패: " + name, e);

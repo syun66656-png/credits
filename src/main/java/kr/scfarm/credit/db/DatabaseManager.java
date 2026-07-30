@@ -5,6 +5,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.configuration.ConfigurationSection;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
@@ -24,7 +26,11 @@ public final class DatabaseManager {
         String name = dbConfig.getString("name", "credit");
 
         hikari.setPoolName("크레딧-Hikari");
-        hikari.setJdbcUrl("jdbc:mariadb://" + host + ":" + port + "/" + name);
+        // socketTimeout 이 없으면 방화벽 idle-drop / DB 페일오버 / 메타데이터 락 대기 시 쿼리가
+        // 무한 대기한다. initSchema 는 onEnable(메인 스레드)에서 도는 만큼, 서버가 영영 부팅되지
+        // 않는 사고로 이어질 수 있어 반드시 지정한다.
+        hikari.setJdbcUrl("jdbc:mariadb://" + host + ":" + port + "/" + name
+                + "?connectTimeout=5000&socketTimeout=60000");
         hikari.setDriverClassName("org.mariadb.jdbc.Driver");
         hikari.setUsername(dbConfig.getString("user", "root"));
         hikari.setPassword(dbConfig.getString("password", ""));
@@ -57,10 +63,47 @@ public final class DatabaseManager {
         }
     }
 
-    /** 시작 시 스키마 자동 생성(CREATE TABLE IF NOT EXISTS). */
+    /**
+     * 시작 시 스키마 자동 생성/보강.
+     *
+     * <p>여러 백엔드가 동시에 재시작하면 같은 DDL 이 동시에 실행되어 메타데이터 락 경합·중복 컬럼
+     * 경합으로 한 서버만 실패할 수 있다(그 서버는 스스로 비활성화되어 크레딧이 죽는다).
+     * 그래서 <b>네임드 락으로 직렬화</b>하고, 컬럼/인덱스 보강은 information_schema 로 존재 여부를
+     * 확인한 뒤 필요한 것만 실행한다(MySQL 은 {@code ADD COLUMN IF NOT EXISTS} 를 지원하지 않으므로
+     * 이 방식이 MariaDB/MySQL 모두에서 동작한다).
+     */
     public void initSchema() throws SQLException {
-        try (Connection conn = dataSource.getConnection();
-             Statement st = conn.createStatement()) {
+        try (Connection conn = dataSource.getConnection()) {
+            boolean locked = acquireLock(conn);
+            try {
+                createAndMigrate(conn);
+            } finally {
+                if (locked) {
+                    releaseLock(conn);
+                }
+            }
+        }
+    }
+
+    private boolean acquireLock(Connection conn) {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT GET_LOCK('credit_schema_init', 10)")) {
+            return rs.next() && rs.getInt(1) == 1;
+        } catch (SQLException e) {
+            return false; // 락을 못 잡아도 스키마 생성 자체는 시도한다(IF NOT EXISTS 라 대개 무해)
+        }
+    }
+
+    private void releaseLock(Connection conn) {
+        try (Statement st = conn.createStatement()) {
+            st.execute("SELECT RELEASE_LOCK('credit_schema_init')");
+        } catch (SQLException ignored) {
+            // 커넥션 종료 시 자동 해제
+        }
+    }
+
+    private void createAndMigrate(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement()) {
             // 잔액 (단일 진실원)
             st.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS credit_balance (
@@ -98,15 +141,18 @@ public final class DatabaseManager {
                       INDEX idx_processed_at (processed_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
-            // 구버전 스키마에서 올라온 경우 감사 컬럼/인덱스 보강(MariaDB 10.2+ IF NOT EXISTS 지원)
-            st.executeUpdate("""
-                    ALTER TABLE credit_processed_charge
-                      ADD COLUMN IF NOT EXISTS nickname       VARCHAR(30) NULL AFTER uuid,
-                      ADD COLUMN IF NOT EXISTS balance_before BIGINT      NULL AFTER amount,
-                      ADD COLUMN IF NOT EXISTS balance_after  BIGINT      NULL AFTER balance_before,
-                      ADD INDEX  IF NOT EXISTS idx_charge_uuid (uuid),
-                      ADD INDEX  IF NOT EXISTS idx_processed_at (processed_at)
-                    """);
+            // 구버전 스키마에서 올라온 경우 감사 컬럼/인덱스 보강.
+            // 존재 여부를 information_schema 로 먼저 확인 → MariaDB/MySQL 모두 호환, 불필요한 DDL 미실행.
+            addColumnIfMissing(conn, st, "credit_processed_charge", "nickname",
+                    "ALTER TABLE credit_processed_charge ADD COLUMN nickname VARCHAR(30) NULL AFTER uuid");
+            addColumnIfMissing(conn, st, "credit_processed_charge", "balance_before",
+                    "ALTER TABLE credit_processed_charge ADD COLUMN balance_before BIGINT NULL AFTER amount");
+            addColumnIfMissing(conn, st, "credit_processed_charge", "balance_after",
+                    "ALTER TABLE credit_processed_charge ADD COLUMN balance_after BIGINT NULL AFTER balance_before");
+            addIndexIfMissing(conn, st, "credit_processed_charge", "idx_charge_uuid",
+                    "ALTER TABLE credit_processed_charge ADD INDEX idx_charge_uuid (uuid)");
+            addIndexIfMissing(conn, st, "credit_processed_charge", "idx_processed_at",
+                    "ALTER TABLE credit_processed_charge ADD INDEX idx_processed_at (processed_at)");
             // 닉네임 캐시(UUID↔닉네임, 접속 시 갱신). PlayerPoints 의 username_cache 테이블 패턴:
             // 멀티 백엔드 네트워크에서 "다른 서버로만 접속했던" 유저도 닉네임/UUID 해석이 가능해진다.
             st.executeUpdate("""
@@ -118,6 +164,57 @@ public final class DatabaseManager {
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
         }
+    }
+
+    private void addColumnIfMissing(Connection conn, Statement st, String table, String column, String ddl)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS " +
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?")) {
+            ps.setString(1, table);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next() && rs.getInt(1) > 0) {
+                    return; // 이미 존재
+                }
+            }
+        }
+        try {
+            st.executeUpdate(ddl);
+        } catch (SQLException e) {
+            // 다른 서버가 동시에 추가한 경우(중복 컬럼) 무시 — 그 외에는 전파
+            if (!isDuplicateObject(e)) {
+                throw e;
+            }
+        }
+    }
+
+    private void addIndexIfMissing(Connection conn, Statement st, String table, String index, String ddl)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT COUNT(*) FROM information_schema.STATISTICS " +
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?")) {
+            ps.setString(1, table);
+            ps.setString(2, index);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next() && rs.getInt(1) > 0) {
+                    return;
+                }
+            }
+        }
+        try {
+            st.executeUpdate(ddl);
+        } catch (SQLException e) {
+            if (!isDuplicateObject(e)) {
+                throw e;
+            }
+        }
+    }
+
+    /** 1060 = Duplicate column, 1061 = Duplicate key name, 1050 = Table exists (동시 DDL 경합). */
+    private static boolean isDuplicateObject(SQLException e) {
+        int c = e.getErrorCode();
+        return c == 1060 || c == 1061 || c == 1050;
     }
 
     public Connection getConnection() throws SQLException {

@@ -143,6 +143,15 @@ public final class Messages {
                 Placeholder.unparsed("suffix", suffix));
     }
 
+    /** {@code <player>} + {@code <amount>} + {@code <suffix>} + {@code <uuid>} 를 채워 렌더링(지급/차감 확인용). */
+    public Component playerAmountUuid(String key, OfflinePlayer papi, String player, long amount, UUID uuid) {
+        return render(key, papi,
+                Placeholder.unparsed("player", player == null ? "" : player),
+                Placeholder.unparsed("amount", formatAmount(amount)),
+                Placeholder.unparsed("suffix", suffix),
+                Placeholder.unparsed("uuid", uuid == null ? "" : uuid.toString()));
+    }
+
     /** {@code <player>} 만 채워 렌더링. */
     public Component player(String key, String player) {
         return render(key, null, Placeholder.unparsed("player", player == null ? "" : player));

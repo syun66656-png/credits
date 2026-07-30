@@ -65,7 +65,33 @@ public final class ChargeLogFile {
         }
     }
 
+    /**
+     * YAML 큰따옴표 스칼라용 이스케이프.
+     *
+     * <p><b>제어문자까지 반드시 이스케이프한다.</b> 닉네임에 개행이 섞이면 스칼라를 탈출해
+     * <b>가짜 지급 항목을 위조</b>해 넣을 수 있고(이 파일은 분쟁 증거로 쓰인다), 탭/NUL 이 들어가면
+     * 그 달 파일 전체가 파싱 불가가 된다. 길이도 함께 제한한다.
+     */
     private static String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        int limit = Math.min(s.length(), 64);
+        for (int i = 0; i < limit; i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20 || c == 0x7F) {
+                        sb.append(String.format("\\u%04X", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
     }
 }

@@ -21,7 +21,9 @@ homepage:
   #   나머지 백엔드는 bridge-enabled: false 로 두어라 — 크레딧 지급/조회/명령어는 그대로 동작하고,
   #   폴링(홈페이지 API 호출)과 [크레딧 자동충전] 감사 로그만 그 한 서버에 모인다.
   #   (지급은 charge_id PK 멱등이라 여러 서버가 켜져도 중복 지급은 없지만, 로그가 흩어지고 폴링이 낭비된다.)
-  bridge-enabled: true
+  #   안전을 위해 기본값은 false 다. 폴링할 서버 1대에서만 true 로 바꾼다.
+  #   base-url 은 반드시 https 여야 하며(평문 전송 방지) 리다이렉트되지 않는 최종 주소여야 한다.
+  bridge-enabled: false
   base-url: "https://scfarm.kr"
   # 홈페이지 운영자에게 받은 비밀키. 절대 로그/채팅에 노출하지 않는다.
   plugin-key: "여기에_PLUGIN_API_KEY"
@@ -50,7 +52,6 @@ redis:
   #   2) 자동충전 지급 알림을 전 백엔드로 브로드캐스트 → 유저가 접속한 서버가 인게임 알림 전달
   #      (브릿지 서버가 1대여도 유저가 어느 백엔드에 있든 알림 도달. 플러그인 없는 hub 는 자동 제외)
   # 끄면: 캐시 없이 DB 조회로 폴백 + 알림은 브릿지 서버 접속자에게만.
-  # 켜려면 plugin.yml 의 libraries 에서 lettuce-core 주석을 해제해야 한다.
   # ※ 네트워크의 모든 크레딧 서버(main/sub1/sub2/minigame)가 같은 Redis 를 바라보게 설정할 것.
   enabled: false
   host: "127.0.0.1"
