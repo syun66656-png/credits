@@ -96,8 +96,9 @@ if (credit != null) {
 ## 홈페이지 결제 브릿지 (명세 8번)
 
 - `poll-interval-seconds` 마다 비동기 폴링: `GET /api/plugin/charges/pending` (헤더 `x-plugin-key`).
+- **지급 수량은 응답의 `credits` 필드다. `amount`(결제 금액, 원)를 그대로 지급하면 안 된다** — 환산 비율은 **1,000원 = 1크레딧**이므로 1,000배 과지급이 된다. `credits` 가 없는 구버전 응답만 `amount / 1000` 으로 폴백하고, 결과가 0 이하면 지급을 보류하고 에러 로그를 남긴다.
 - 각 건을 **단일 MariaDB 트랜잭션**으로 "정확히 한 번" 지급:
-  `INSERT processed_charge`(PK 충돌 = 이미 처리 → 재지급 안 함) + `UPSERT balance += amount` + `INSERT ledger(HOMEPAGE_CHARGE)`.
+  `INSERT processed_charge`(PK 충돌 = 이미 처리 → 재지급 안 함) + `UPSERT balance += credits` + `INSERT ledger(HOMEPAGE_CHARGE)`.
 - 지급/스킵 무관하게 `POST /api/plugin/charges/complete {"id":...}` 로 보고(멱등). 보고 실패 시 다음 폴링에 재보고되어 수렴.
 - **오프라인/미접속 UUID 도 지급된다**(UUID 기반 UPSERT — `Bukkit.getPlayer` 를 요구하지 않음). 네트워크 오류 → 다음 폴링 재시도, 401 → 키 오류 로그, DB 실패 → 보고 보류.
 - **지급 알림:** 브릿지가 도는 서버에 접속 중인 유저에게만 지급 직후 인게임 알림(`charge-received`)을 보낸다. 오프라인/타 백엔드 접속자는 조용히 지급만 되고 별도 알림은 없다(잔액은 즉시 반영, `/크레딧` 으로 확인).

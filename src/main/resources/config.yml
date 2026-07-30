@@ -32,8 +32,9 @@ homepage:
   charge-log-file: true
 
 display:
-  # 금액 뒤 접미사(예: 원 / 크레딧)
-  suffix: "원"
+  # 잔액 뒤 접미사. 잔액의 단위는 크레딧이다(홈페이지 충전 비율 1,000원 = 1크레딧).
+  # "원" 으로 두면 50크레딧이 "50원" 으로 보여 오해를 부른다.
+  suffix: "크레딧"
   # 3자리마다 콤마
   thousands-separator: true
 

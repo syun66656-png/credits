@@ -212,15 +212,15 @@ public final class CreditPlugin extends JavaPlugin {
                 : null;
 
         HomepageBridge bridge = new HomepageBridge(baseUrl, key, dao, getComponentLogger(),
-                (uuid, amount) -> {
+                (uuid, credits) -> {
                     // 캐시 무효화 + (Redis 시) 교차서버 무효화 브로드캐스트
                     creditService.notifyExternalChange(uuid);
                     // 지급 알림: Redis 가 있으면 전 백엔드로 브로드캐스트(자기 포함) → 유저가 접속한 서버가 전달.
                     //           없으면 브릿지 서버 로컬로만 전달(폴백).
                     if (redis != null) {
-                        redis.publishChargeNotify(uuid, amount);
+                        redis.publishChargeNotify(uuid, credits);
                     } else {
-                        deliverChargeNotification(uuid, amount);
+                        deliverChargeNotification(uuid, credits);
                     }
                 }, chargeLog);
         // Paper 비동기 스케줄러: 메인 스레드를 절대 막지 않는다.
@@ -245,14 +245,16 @@ public final class CreditPlugin extends JavaPlugin {
      * 자동충전 지급 인게임 알림 전달. 브릿지 async 스레드 또는 Redis 구독 스레드에서 호출될 수 있으므로
      * 실제 전송은 메인 스레드로 디스패치한다. {@code getPlayer(uuid)} 가 이 서버 접속자만 반환하므로,
      * 네트워크 전체에서 유저가 접속한 바로 그 백엔드 1대만 실제로 알림을 보낸다(플러그인 없는 hub 는 자동 제외).
+     *
+     * @param credits 지급된 크레딧 수량 (결제 금액이 아니다 — 1,000원 = 1크레딧)
      */
-    private void deliverChargeNotification(UUID uuid, long amount) {
+    private void deliverChargeNotification(UUID uuid, long credits) {
         getServer().getGlobalRegionScheduler().execute(this, () -> {
             org.bukkit.entity.Player p = getServer().getPlayer(uuid);
             if (p != null && messages != null) {
                 // 메인 스레드 → PAPI(%...%) 안전. <player> = 지급 대상 닉네임. 빈 메세지면 null → 전송 생략.
                 net.kyori.adventure.text.Component c =
-                        messages.playerAmount("charge-received", p, p.getName(), amount);
+                        messages.playerAmount("charge-received", p, p.getName(), credits);
                 if (c != null) {
                     p.sendMessage(c);
                 }

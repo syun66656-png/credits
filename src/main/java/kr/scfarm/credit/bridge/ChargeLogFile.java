@@ -36,15 +36,22 @@ public final class ChargeLogFile {
         }
     }
 
-    /** 지급 1건을 월별 yml 파일에 한 항목(YAML 시퀀스 블록)으로 append 한다. */
-    public void append(String chargeId, UUID uuid, String nickname, long amount, long before, long after) {
+    /**
+     * 지급 1건을 월별 yml 파일에 한 항목(YAML 시퀀스 블록)으로 append 한다.
+     *
+     * @param amount  결제 금액(원)
+     * @param credits 실제 지급된 크레딧 수량 (1,000원 = 1크레딧)
+     */
+    public void append(String chargeId, UUID uuid, String nickname, long amount, long credits,
+                       long before, long after) {
         ZonedDateTime now = ZonedDateTime.now(); // 서버 로컬 타임존
         File file = new File(dir, "charges-" + now.format(MONTH) + ".yml");
 
         String block = "- charge_id: \"" + escape(chargeId) + "\"\n"
                 + "  uuid: \"" + uuid + "\"\n"
                 + "  nickname: \"" + escape(nickname == null ? "" : nickname) + "\"\n"
-                + "  amount: " + amount + "\n"
+                + "  amount_won: " + amount + "\n"
+                + "  credits: " + credits + "\n"
                 + "  balance_before: " + before + "\n"
                 + "  balance_after: " + after + "\n"
                 + "  time: \"" + now.format(STAMP) + "\"\n";

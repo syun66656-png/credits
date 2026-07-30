@@ -31,6 +31,12 @@ public final class HomepageBridge {
 
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(15);
 
+    /**
+     * 크레딧 환산 비율 — 1,000원 = 1크레딧.
+     * 홈페이지가 {@code credits} 를 내려주므로 보통 쓰이지 않고, 구버전 응답 폴백에만 사용한다.
+     */
+    private static final long WON_PER_CREDIT = 1000L;
+
     private final String pendingUrl;
     private final String completeUrl;
     private final String pluginKey;
@@ -38,7 +44,8 @@ public final class HomepageBridge {
     private final ComponentLogger logger;
     private final HttpClient http;
     /**
-     * 지급 성공 시 (uuid, amount) 로 호출 — 캐시 무효화/Redis 브로드캐스트/온라인 알림용.
+     * 지급 성공 시 (uuid, 지급 크레딧) 으로 호출 — 캐시 무효화/Redis 브로드캐스트/온라인 알림용.
+     * 결제 금액(원)이 아니라 실제 지급된 크레딧 수량이 전달된다.
      * 비동기 스레드에서 호출되므로 구현측에서 Bukkit 이 필요하면 메인 스레드로 디스패치해야 한다.
      */
     private final BiConsumer<UUID, Long> onPaid;
@@ -118,13 +125,23 @@ public final class HomepageBridge {
             return;
         }
         UUID uuid;
-        long amount;
+        long amount;  // 결제 금액(원) — 감사 로그용. 지급 수량이 아니다.
+        long credits; // 실제 지급할 크레딧 수량
         try {
             uuid = parseUuid(charge.get("uuid").getAsString());
             amount = charge.get("amount").getAsLong();
+            credits = readCredits(charge, amount);
         } catch (Exception e) {
             logger.warn("결제 건 " + chargeId + " 필드 오류(uuid/amount). 건너뜁니다.");
             return;
+        }
+        if (credits <= 0) {
+            // 결제는 됐는데 지급 수량이 0 이면 홈페이지 응답이 이상한 것 — 임의로 환산해 지급하지 않는다.
+            // 아래 processCharge 가 0 이하를 "무효 건"으로 기록해 무한 재처리를 막으므로,
+            // 놓치지 않도록 여기서 에러 로그만 남기고 그 경로를 그대로 태운다.
+            logger.error("결제 건 " + chargeId + " 지급 크레딧이 0 이하입니다(결제액=" + amount
+                    + "원, credits=" + (charge.has("credits") ? charge.get("credits") : "없음")
+                    + "). 지급 없이 무효 처리합니다 — 홈페이지 응답을 확인하세요.");
         }
         // 닉네임은 참고용(감사 기록·로그). 지급 키는 항상 uuid — 없거나 이상해도 지급엔 영향 없음.
         String nickname = null;
@@ -138,7 +155,7 @@ public final class HomepageBridge {
 
         ChargeOutcome outcome;
         try {
-            outcome = dao.processCharge(chargeId, uuid, nickname, amount);
+            outcome = dao.processCharge(chargeId, uuid, nickname, credits);
         } catch (Exception e) {
             // DB 오류 → 지급 실패로 간주. processed 기록/보고 하지 않고 다음 폴링에 재시도.
             logger.warn("결제 건 " + chargeId + " 지급 트랜잭션 실패(재시도 예정): " + e.getMessage());
@@ -152,17 +169,18 @@ public final class HomepageBridge {
                 logger.info("[크레딧 자동충전] charge=" + chargeId
                         + " 닉네임=" + (nickname == null ? "?" : nickname)
                         + " uuid=" + uuid
-                        + " 지급액=" + amount
+                        + " 결제액=" + amount + "원"
+                        + " 지급=" + credits + "크레딧"
                         + " 지급전=" + outcome.balanceBefore()
                         + " 지급후=" + outcome.balanceAfter());
                 // 플러그인 폴더 안 yml 파일에도 기록(사람이 바로 열어볼 수 있는 append-only 로그)
                 if (chargeLog != null) {
-                    chargeLog.append(chargeId, uuid, nickname, amount,
+                    chargeLog.append(chargeId, uuid, nickname, amount, credits,
                             outcome.balanceBefore(), outcome.balanceAfter());
                 }
                 // 지급 직후 캐시 통지 + (이 백엔드에 접속 중이면) 인게임 알림
                 try {
-                    onPaid.accept(uuid, amount);
+                    onPaid.accept(uuid, credits);
                 } catch (Exception e) {
                     logger.warn("지급 후 통지 실패(무시): " + e.getMessage());
                 }
@@ -196,6 +214,20 @@ public final class HomepageBridge {
         } catch (Exception e) {
             logger.warn("결제 완료 보고 중 네트워크 오류: charge=" + chargeId + " (" + e.getMessage() + ")");
         }
+    }
+
+    /**
+     * 지급할 크레딧 수량을 읽는다.
+     *
+     * <p>홈페이지는 {@code credits} 필드로 지급 수량을 내려준다. 구버전 응답에 이 필드가 없을 때만
+     * 결제 금액에서 환산한다(1,000원 = 1크레딧). {@code amount} 를 그대로 지급하면 1,000배
+     * 과지급이 되므로 어떤 경로에서도 그렇게 하지 않는다.
+     */
+    private static long readCredits(JsonObject charge, long amount) {
+        if (charge.has("credits") && !charge.get("credits").isJsonNull()) {
+            return charge.get("credits").getAsLong();
+        }
+        return amount / WON_PER_CREDIT;
     }
 
     private static UUID parseUuid(String raw) {
