@@ -271,12 +271,18 @@ public final class CreditDao {
      * 홈페이지 결제 1건을 "정확히 한 번" 지급 + 분쟁 방지 감사 기록. 단일 트랜잭션:
      * <pre>
      *   INSERT processed_charge(charge_id, uuid, nickname, amount)  -- PK 충돌 = 이미 처리됨 → ALREADY_PROCESSED
-     *   UPSERT balance += amount
-     *   UPDATE processed_charge SET balance_before, balance_after   -- 같은 트랜잭션에서 확정된 전/후 잔액
+     *   SELECT balance FOR UPDATE                                   -- ① 지급 전 잔액 실측(행 잠금)
+     *   UPSERT balance += amount                                    -- ② 지급
+     *   SELECT balance                                              -- ③ 지급 후 잔액 실측
+     *   검증: ③ - ① == amount  아니면 전체 롤백(BALANCE_MISMATCH)      -- ④ 대조
+     *   UPDATE processed_charge SET balance_before=①, balance_after=③
      *   INSERT ledger(delta=+amount, reason=HOMEPAGE_CHARGE, ref=charge_id)
      * </pre>
-     * charge_id PK 충돌로 재지급이 원천 차단된다. UPSERT 가 잔액 행을 X-잠금하므로
-     * {@code balance_before = balance_after - amount} 는 이 트랜잭션 기준으로 정확한 값이다.
+     *
+     * <p><b>"지급 완료" 판정 기준</b>: 지급 전 잔액과 지급 후 잔액을 <b>각각 실측</b>해
+     * {@code 지급후 - 지급전 == 지급수량} 이 성립할 때에만 커밋하고 {@link ChargeResult#PAID} 를 돌려준다.
+     * 이 등식이 깨지면 커밋하지 않고 되돌려 {@link ChargeResult#BALANCE_MISMATCH} 를 돌려주며,
+     * 호출측(브릿지)은 완료 보고를 하지 않는다. charge_id PK 충돌로 재지급은 원천 차단된다.
      * 오류 시 전체 롤백(감사 기록도 지급과 함께만 남는다 — 반쪽 기록 불가).
      */
     public ChargeOutcome processCharge(String chargeId, UUID uuid, String nickname, long amount) throws SQLException {
@@ -314,13 +320,29 @@ public final class CreditDao {
                 throw dup;
             }
 
+            // ── 지급 전 잔액 실측 ──────────────────────────────────────────
+            // 행을 만들고(없으면 0) X-잠금한 뒤 읽는다. 역산(after - amount)이 아니라 실측해야
+            // 아래 검증이 의미를 갖는다(역산하면 등식이 항상 참이라 검증 자체가 성립하지 않는다).
+            ensureRow(conn, uuid);
+            long before = readBalanceForUpdate(conn, uuid);
+
+            // ── 지급 ──────────────────────────────────────────────────────
             try (PreparedStatement up = conn.prepareStatement(SQL_GIVE_UPSERT)) {
                 up.setString(1, uuid.toString());
                 up.setLong(2, amount);
                 up.executeUpdate();
             }
-            long after = readBalance(conn, uuid); // UPSERT 로 행이 잠긴 상태 → 정확
-            long before = after - amount;
+
+            // ── 지급 후 잔액 실측 + 대조 검증 ────────────────────────────────
+            long after = readBalance(conn, uuid); // 위에서 잠근 행 → 자기 트랜잭션 변경 반영
+            if (after - before != amount) {
+                // 지급이 온전히 반영되지 않았다(트리거/외부 수정/클램프 등).
+                // 커밋하지 않고 전체 롤백 → 지급도, 완료 보고도 하지 않는다.
+                conn.rollback();
+                return ChargeOutcome.mismatch(before, after);
+            }
+
+            // 검증을 통과한 값만 감사 기록으로 남긴다(실측 전 잔액 + 실측 후 잔액).
             try (PreparedStatement ps = conn.prepareStatement(SQL_PROCESSED_AUDIT)) {
                 ps.setLong(1, before);
                 ps.setLong(2, after);

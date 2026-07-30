@@ -20,4 +20,12 @@ public record ChargeOutcome(ChargeResult status, long balanceBefore, long balanc
     public static ChargeOutcome rejected() {
         return new ChargeOutcome(ChargeResult.REJECTED, -1, -1);
     }
+
+    /**
+     * 잔액 검증 실패(전체 롤백) — 실측한 전/후 잔액을 그대로 담아 원인 파악에 쓴다.
+     * 완료 보고하지 않는다.
+     */
+    public static ChargeOutcome mismatch(long before, long after) {
+        return new ChargeOutcome(ChargeResult.BALANCE_MISMATCH, before, after);
+    }
 }

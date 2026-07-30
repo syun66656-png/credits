@@ -249,6 +249,16 @@ public final class HomepageBridge {
                 }
                 return;
             }
+            case BALANCE_MISMATCH -> {
+                // 지급 전/후 잔액 대조가 어긋나 전체 롤백된 상태 — 잔액은 그대로다.
+                // 완료 보고를 하지 않아 홈페이지에는 미지급으로 남는다(다음 폴링에 재시도).
+                logger.error("[크레딧 자동충전 검증실패] charge=" + chargeId
+                        + " uuid=" + uuid + " 지급크레딧=" + credits
+                        + " 지급전=" + outcome.balanceBefore() + " 지급후=" + outcome.balanceAfter()
+                        + " — 잔액 증가분이 지급 수량과 일치하지 않아 지급을 취소했습니다."
+                        + " 완료 보고도 하지 않았습니다. DB 트리거/외부 수정 여부를 확인하세요.");
+                return;
+            }
             case FAILED -> {
                 return; // 보고하지 않음
             }
