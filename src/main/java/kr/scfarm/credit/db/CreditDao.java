@@ -334,7 +334,11 @@ public final class CreditDao {
             }
 
             // ── 지급 후 잔액 실측 + 대조 검증 ────────────────────────────────
-            long after = readBalance(conn, uuid); // 위에서 잠근 행 → 자기 트랜잭션 변경 반영
+            // 위에서 잠근 행을 같은 트랜잭션에서 읽으므로 자기 UPSERT 결과가 보인다.
+            // ※ 이 SELECT 는 단순 감사용이 아니라 "지급 완료" 판정 게이트다. JDBC URL 을
+            //   jdbc:mariadb:replication:// 로 바꾸거나 읽기/쓰기 분리 프록시를 넣으면 이 읽기가
+            //   레플리카로 라우팅돼 모든 지급이 검증 실패할 수 있다(단일 호스트 URL 을 유지할 것).
+            long after = readBalance(conn, uuid);
             if (after - before != amount) {
                 // 지급이 온전히 반영되지 않았다(트리거/외부 수정/클램프 등).
                 // 커밋하지 않고 전체 롤백 → 지급도, 완료 보고도 하지 않는다.
